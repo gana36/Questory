@@ -1,6 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from shared.schemas import HealthResponse # we will install the shared package
+from pydantic import BaseModel
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
 
 app = FastAPI(
     title="Questory API",
