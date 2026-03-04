@@ -1,0 +1,18 @@
+{
+  "name": "questory-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive Learning Storyworld",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w apps/api\" \"npm run dev -w apps/web\"",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "npm run format --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
