@@ -1,0 +1,60 @@
+{
+    "id": "sess_12345",
+    "created_at": "2026-03-05T08:45:00Z",
+    "topic": "Ancient Rome",
+    "settings": {
+        "difficulty": "medium",
+        "language": "en"
+    },
+    "scenes": [
+        {
+            "id": "scene_1",
+            "narration": "You stand before the majestic Colosseum at sunset. The roar of the unseen crowd echoes in the distance.",
+            "image_prompt": "A cinematic view of the Roman Colosseum at sunset, crowds gathering outside, beautiful lighting",
+            "choices": [
+                {
+                    "id": "choice_1a",
+                    "text": "Approach the gladiator entrance",
+                    "next_scene_id": "scene_2",
+                    "correctness": true,
+                    "feedback": "You boldly walk towards the grand entrance, heart pounding."
+                },
+                {
+                    "id": "choice_1b",
+                    "text": "Walk away",
+                    "next_scene_id": "scene_end",
+                    "correctness": false,
+                    "feedback": "You decide the arena is too dangerous and head back to the city."
+                }
+            ],
+            "hotspots": [
+                {
+                    "id": "hotspot_1",
+                    "label": "Gladiator Statue",
+                    "x": 10.5,
+                    "y": 20.0,
+                    "w": 5.0,
+                    "h": 15.0,
+                    "dialogue": "Hail, citizen! Are you here for the games?",
+                    "expand_text": "A towering bronze statue of a decorated gladiator.",
+                    "sound_cue": "crowd_cheer.mp3"
+                }
+            ],
+            "quiz": {
+                "question": "In what century was the Colosseum built?",
+                "options": [
+                    "1st Century AD",
+                    "1st Century BC",
+                    "2nd Century AD"
+                ],
+                "correct_index": 0,
+                "explanation": "Construction began under the emperor Vespasian in AD 72, which is in the 1st Century AD."
+            }
+        }
+    ],
+    "state": {
+        "current_scene_index": 0,
+        "score": 0,
+        "decisions": []
+    }
+}
