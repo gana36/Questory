@@ -1,5 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
 from src.routers import live_router
 
 app = FastAPI(title="Questory Backend")

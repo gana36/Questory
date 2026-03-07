@@ -1,16 +1,19 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 type GeminiLiveStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-type GamePhase = 'topic' | 'style' | 'settings' | 'ready'; // Added phases for game UI
+type GamePhase = 'topic' | 'heroes' | 'style' | 'settings' | 'ready'; // Added phases for game UI
 
 interface UseGeminiLiveProps {
     onMessage?: (text: string, isFinal: boolean) => void;
     onFunctionCall?: (name: string, args: any) => void;
     // New callback to receive image updates from the proxy backend
     onSceneUpdate?: (imageUrl: string) => void;
+    onHeroesProposed?: (concept: string, heroes: any[]) => void;
+    onHeroImageGenerated?: (heroId: string, imageUrl: string) => void;
+    onCustomHeroGenerating?: (heroId: string, name: string) => void;
 }
 
-export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseGeminiLiveProps = {}) {
+export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating }: UseGeminiLiveProps = {}) {
     // ... [Status hooks mostly unchanged]
     const [status, setStatus] = useState<GeminiLiveStatus>('disconnected');
     const [gamePhase, setGamePhase] = useState<GamePhase>('topic');
@@ -21,6 +24,15 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
     const audioContextRef = useRef<AudioContext | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
     const processorNodeRef = useRef<AudioWorkletNode | null>(null);
+    const playbackAnalyserRef = useRef<AnalyserNode | null>(null);
+    const micAnalyserRef = useRef<AnalyserNode | null>(null);
+    const isThinkingRef = useRef(false);
+    const statusRef = useRef(status);
+
+    useEffect(() => {
+        isThinkingRef.current = isThinking;
+        statusRef.current = status;
+    }, [isThinking, status]);
 
     const nextPlayTimeRef = useRef<number>(0);
 
@@ -67,11 +79,18 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
 
                 // 1. Handle Custom Proxy Events (ex: Nano Banana images)
                 if (data.backendEvent) {
-                    if (data.backendEvent.type === 'scene_update' && data.backendEvent.imageUrl) {
+                    const eventType = data.backendEvent.type;
+
+                    if (eventType === 'scene_update' && data.backendEvent.imageUrl) {
                         onSceneUpdate?.(data.backendEvent.imageUrl);
-                    }
-                    if (data.backendEvent.type === 'image_generation_started') {
+                    } else if (eventType === 'image_generation_started') {
                         setIsThinking(true); // show the UI generating state
+                    } else if (eventType === 'heroes_proposed') {
+                        onHeroesProposed?.(data.backendEvent.concept, data.backendEvent.heroes);
+                    } else if (eventType === 'hero_image_generated') {
+                        onHeroImageGenerated?.(data.backendEvent.id, data.backendEvent.imageUrl);
+                    } else if (eventType === 'custom_hero_generating') {
+                        onCustomHeroGenerating?.(data.backendEvent.id, data.backendEvent.name);
                     }
                     return;
                 }
@@ -128,7 +147,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
             console.error(error);
             setStatus('error');
         }
-    }, [onMessage, onFunctionCall, onSceneUpdate]);
+    }, [onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating]);
 
     const playAudioChunk = async (base64Data: string) => {
         if (!audioContextRef.current) return;
@@ -157,7 +176,12 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
 
             const source = ctx.createBufferSource();
             source.buffer = audioBuffer;
-            source.connect(ctx.destination);
+
+            if (playbackAnalyserRef.current) {
+                source.connect(playbackAnalyserRef.current);
+            } else {
+                source.connect(ctx.destination);
+            }
 
             const currentTime = ctx.currentTime;
             const playTime = Math.max(currentTime, nextPlayTimeRef.current);
@@ -201,10 +225,23 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
             audioContextRef.current = playbackCtx;
             nextPlayTimeRef.current = playbackCtx.currentTime;
 
+            // Setup Playback Analyser for AI Voice visualization
+            const playbackAnalyser = playbackCtx.createAnalyser();
+            playbackAnalyser.fftSize = 256;
+            playbackAnalyser.connect(playbackCtx.destination);
+            playbackAnalyserRef.current = playbackAnalyser;
+
             await micCtx.audioWorklet.addModule('/audio-processor.js');
             console.log('[Mic] AudioWorklet module loaded.');
 
             const source = micCtx.createMediaStreamSource(stream);
+
+            // Setup Mic Analyser for User Voice visualization
+            const micAnalyser = micCtx.createAnalyser();
+            micAnalyser.fftSize = 256;
+            source.connect(micAnalyser);
+            micAnalyserRef.current = micAnalyser;
+
             const processor = new AudioWorkletNode(micCtx, 'audio-processor');
 
             let chunkCount = 0;
@@ -288,5 +325,22 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate }: UseG
         }
     }, []);
 
-    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking };
+    // Get current audio volume (0.0 to 1.0) for UI visualization
+    const getVolume = useCallback(() => {
+        let maxVolume = 0;
+        if (isThinkingRef.current && playbackAnalyserRef.current) {
+            const dataArray = new Uint8Array(playbackAnalyserRef.current.frequencyBinCount);
+            playbackAnalyserRef.current.getByteFrequencyData(dataArray);
+            const sum = dataArray.reduce((acc, val) => acc + val, 0);
+            maxVolume = sum / dataArray.length / 128;
+        } else if (!isThinkingRef.current && statusRef.current === 'connected' && micAnalyserRef.current) {
+            const dataArray = new Uint8Array(micAnalyserRef.current.frequencyBinCount);
+            micAnalyserRef.current.getByteFrequencyData(dataArray);
+            const sum = dataArray.reduce((acc, val) => acc + val, 0);
+            maxVolume = (sum / dataArray.length / 128) * 1.5; // Boost mic visually
+        }
+        return Math.min(maxVolume, 1.0);
+    }, []);
+
+    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking, getVolume };
 }

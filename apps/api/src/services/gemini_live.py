@@ -1,21 +1,29 @@
 import json
 import base64
 import asyncio
+import os
 from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
 
-from src.services.nano_banana import generate_dreamy_background
+from src.services.image_gen import generate_image
 
 # Common Configuration for the Story Gemini
 SCENE_SYSTEM_INSTRUCTION = """
-You are the narrator and guide for an interactive learning story. 
-The user is in a dreamy 3D prehistoric forest scene. Talk to them enthusiastically. 
-Start by describing the giant footprints and rustling ferns in 1 or 2 short sentences and ask what they want to do next. 
-If they inspect an object, give them a fun 2-sentence educational fact.
+You are Dora, the enthusiastic guide and Game Master for an interactive learning story app called Questory.
+You are currently helping the user set up their new adventure. 
 
-IMPORTANT: When the user decides to move to a completely new area or progresses deeper into the story, 
-you MUST call the `generate_scene_image` tool with a visual description of the new beautiful area so we can update the game background.
+Follow this flow strictly:
+1. The user will tell you what topic they want to learn about or what kind of story they want (e.g., "Dinosaurs", "Space Pirates", "Ancient Egypt").
+2. Acknowledge their choice enthusiastically in 1-2 short sentences.
+3. Immediately generate a 1-sentence "Story Concept" based on their topic.
+4. Immediately generate 3 distinct "Hero Options" for them to play as in this story.
+5. YOU MUST CALL the `propose_heroes` tool with the concept and the 3 hero options.
+6. Then, ask the user which hero they want to be, or if they want to create their own custom hero.
+7. If they ask for a custom hero, YOU MUST CALL the `generate_custom_hero` tool, then excitedly confirm their choice.
+8. Once a hero is chosen, ask them if they are ready to start the adventure.
+
+Keep all spoken responses under 3 sentences. Be energetic and magical!
 """
 
 TOOLS = [
@@ -33,6 +41,47 @@ TOOLS = [
                         }
                     },
                     "required": ["visual_description"]
+                }
+            },
+            {
+                "name": "propose_heroes",
+                "description": "Call this to propose 3 distinct hero options based on the user's topic.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "concept": {
+                            "type": "STRING",
+                            "description": "A 1-sentence summary of the story concept."
+                        },
+                        "heroes": {
+                            "type": "ARRAY",
+                            "description": "Exactly 3 hero options.",
+                            "items": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "id": {"type": "STRING", "description": "Unique ID for the hero (e.g., 'hero_1')"},
+                                    "name": {"type": "STRING", "description": "The hero's name/class (e.g., 'Captain Rex')"},
+                                    "description": {"type": "STRING", "description": "1 sentence describing their abilities or personality."},
+                                    "visual_description": {"type": "STRING", "description": "A detailed visual prompt for generating their image (e.g., 'A brave space pirate puppy wearing goggles and a red cape')."}
+                                },
+                                "required": ["id", "name", "description", "visual_description"]
+                            }
+                        }
+                    },
+                    "required": ["concept", "heroes"]
+                }
+            },
+            {
+                "name": "generate_custom_hero",
+                "description": "Call this if the user asks for a completely custom hero instead of the 3 proposed options.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "id": {"type": "STRING", "description": "Unique ID for the custom hero (e.g., 'custom_hero')"},
+                        "name": {"type": "STRING", "description": "The custom hero's name"},
+                        "visual_description": {"type": "STRING", "description": "Detailed visual description for the image generator."}
+                    },
+                    "required": ["id", "name", "visual_description"]
                 }
             }
         ]
@@ -66,8 +115,10 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
 
     try:
         # Initialize the google-genai client
-        # It automatically picks up GOOGLE_API_KEY / GEMINI_API_KEY from the environment
-        client = genai.Client()
+        # It automatically picks up GOOGLE_API_KEY / GEMINI_API_KEY from the environment,
+        # but we pass it explicitly here for robustness.
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        client = genai.Client(api_key=api_key)
         
         # Build config using dict format (recommended by the latest SDK docs)
         config = {
@@ -207,8 +258,8 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                             if response.tool_call:
                                 for function_call in response.tool_call.function_calls:
                                     name = function_call.name
-                                    args = function_call.args
-                                    print(f"[{session_id}] Gemini requested tool: {name} with args: {args}")
+                                    args = function_call.args if isinstance(function_call.args, dict) else (function_call.args.to_dict() if hasattr(function_call.args, 'to_dict') else dict(function_call.args))
+                                    print(f"[{session_id}] Gemini requested tool: {name} with parsed args: {args}")
 
                                     if name == "generate_scene_image":
                                         visual_description = args.get("visual_description", "")
@@ -220,8 +271,8 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                             }
                                         })
 
-                                        # 2. Generate with Nano Banana
-                                        new_image_url = await generate_dreamy_background(visual_description)
+                                        # 2. Generate with Image API
+                                        new_image_url = await generate_image(visual_description)
 
                                         # 3. Tell the frontend to update the image
                                         if new_image_url:
@@ -239,6 +290,95 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                                     name=name,
                                                     id=function_call.id,
                                                     response={"result": "Image generated successfully. The user can see it now."}
+                                                )
+                                            ]
+                                        )
+
+                                    elif name == "propose_heroes":
+                                        concept = args.get("concept", "")
+                                        heroes = args.get("heroes", [])
+                                        # Convert heroes to a list of dicts safely in case they are Protobuf Structs
+                                        parsed_heroes = []
+                                        for h in heroes:
+                                            if hasattr(h, 'to_dict'):
+                                                parsed_heroes.append(h.to_dict())
+                                            elif isinstance(h, dict):
+                                                parsed_heroes.append(h)
+                                            else:
+                                                parsed_heroes.append(dict(h)) # Attempt coercion
+
+                                        # 1. Immediately send the text concepts to the frontend
+                                        await safe_send({
+                                            "backendEvent": {
+                                                "type": "heroes_proposed",
+                                                "concept": concept,
+                                                "heroes": [{"id": h.get("id", f"hero_{i}"), "name": h.get("name", "Unknown"), "description": h.get("description", "")} for i, h in enumerate(parsed_heroes)]
+                                            }
+                                        })
+
+                                        # 2. Concurrently generate images for all 3 heroes
+                                        async def generate_and_send(hero_data):
+                                            try:
+                                                print(f"[{session_id}] [Thread] Generating image for hero: {hero_data.get('name')}")
+                                                visual_desc = hero_data.get('visual_description', '')
+                                                url = await generate_image(visual_desc, is_character=True)
+                                                if url:
+                                                    print(f"[{session_id}] [Thread] Sending generated image for hero: {hero_data.get('name')}")
+                                                    await safe_send({
+                                                        "backendEvent": {
+                                                            "type": "hero_image_generated",
+                                                            "id": hero_data.get("id"),
+                                                            "imageUrl": url
+                                                        }
+                                                    })
+                                            except Exception as task_e:
+                                                print(f"[{session_id}] [Thread] Error generating hero image: {task_e}")
+                                        
+                                        # Fire off the generation tasks without blocking the main loop
+                                        for h in parsed_heroes:
+                                            asyncio.create_task(generate_and_send(h))
+
+                                        # 3. Tell Gemini we showed the options
+                                        await gemini_session.send_tool_response(
+                                            function_responses=[
+                                                types.FunctionResponse(
+                                                    name=name,
+                                                    id=function_call.id,
+                                                    response={"result": "Hero options displayed to user. Waiting for their choice."}
+                                                )
+                                            ]
+                                        )
+                                        
+                                    elif name == "generate_custom_hero":
+                                        custom_id = args.get("id", "custom_hero")
+                                        hero_name = args.get("name", "Custom Hero")
+                                        visual_desc = args.get("visual_description", "")
+                                        
+                                        await safe_send({
+                                            "backendEvent": {
+                                                "type": "custom_hero_generating",
+                                                "id": custom_id,
+                                                "name": hero_name
+                                            }
+                                        })
+                                        
+                                        url = await generate_image(visual_desc, is_character=True)
+                                        
+                                        if url:
+                                            await safe_send({
+                                                "backendEvent": {
+                                                    "type": "hero_image_generated",
+                                                    "id": custom_id,
+                                                    "imageUrl": url
+                                                }
+                                            })
+                                            
+                                        await gemini_session.send_tool_response(
+                                            function_responses=[
+                                                types.FunctionResponse(
+                                                    name=name,
+                                                    id=function_call.id,
+                                                    response={"result": "Custom hero image generated successfully."}
                                                 )
                                             ]
                                         )
