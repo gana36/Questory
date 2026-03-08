@@ -114,10 +114,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
                 if (data.toolCall) {
                     for (const call of data.toolCall.functionCalls) {
                         onFunctionCall?.(call.name, call.args);
-
-                        if (call.name === 'setTopic') setGamePhase('style');
-                        if (call.name === 'setStyle') setGamePhase('settings');
-                        if (call.name === 'setSettings') setGamePhase('ready');
                     }
 
                     // For frontend tools, we still reply via the proxy
