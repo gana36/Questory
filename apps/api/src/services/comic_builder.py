@@ -194,6 +194,7 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
     await client_ws.accept()
 
     client_disconnected = asyncio.Event()
+    pending_tasks: set[asyncio.Task] = set()
 
     async def safe_send(payload: dict):
         """Send JSON to the client WebSocket, but only if still connected."""
@@ -374,7 +375,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                                     }
                                                 })
 
-                                        asyncio.create_task(generate_panel_image())
+                                        task = asyncio.create_task(generate_panel_image())
+                                        pending_tasks.add(task)
+                                        task.add_done_callback(pending_tasks.discard)
 
                                         # 3. Immediately confirm to Gemini so it continues
                                         await gemini_session.send_tool_response(
@@ -457,6 +460,13 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                 receive_from_client(),
                 receive_from_gemini()
             )
+
+            # Cancel any in-flight image generation tasks
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                print(f"[{session_id}] [Builder] Cancelled {len(pending_tasks)} pending tasks")
 
             print(f"[{session_id}] [Builder] Session ended cleanly")
 

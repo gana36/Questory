@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
-export type BuilderStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type BuilderStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 export type BuilderPhase = 'connecting' | 'building' | 'quiz_active' | 'complete';
 
 export interface ComicPanelState {
@@ -37,6 +37,9 @@ const AGE_LABELS: Record<number, string> = {
     4: 'Teen (ages 14+)',
 };
 
+const MAX_RECONNECT_ATTEMPTS = 3;
+const BACKOFF_BASE_MS = 1000; // 1s → 2s → 4s
+
 function buildInitialPrompt(ctx: StorySessionContext): string {
     const ageLabel = AGE_LABELS[ctx.ageRange] ?? 'Elementary (ages 8-10)';
     return `Let's build our comic story!
@@ -49,6 +52,18 @@ Quiz Frequency: ${ctx.quizFrequency}
 Please start narrating and building panels right away! Begin with an exciting opening scene that introduces our hero and world!`;
 }
 
+function buildResumePrompt(ctx: StorySessionContext, panels: ComicPanelState[], score: number): string {
+    const ageLabel = AGE_LABELS[ctx.ageRange] ?? 'Elementary (ages 8-10)';
+    const panelSummary = panels.map((p, i) => `Panel ${i + 1}: ${p.narration}`).join('\n');
+    return `[CONTEXT RESUME] We are in the middle of building a comic story together.
+Topic: ${ctx.topic}, Hero: ${ctx.heroName}, Art Style: ${ctx.artStyle}
+Audience Age: ${ageLabel}, Quiz Frequency: ${ctx.quizFrequency}
+Panels completed so far: ${panels.length}
+${panelSummary}
+Current score: ${score}
+Please continue the story from where we left off! Pick up right after panel ${panels.length} and create the next panel.`;
+}
+
 export function useStoryBuilder(sessionId: string) {
     const [status, setStatus] = useState<BuilderStatus>('disconnected');
     const [builderPhase, setBuilderPhase] = useState<BuilderPhase>('connecting');
@@ -58,6 +73,7 @@ export function useStoryBuilder(sessionId: string) {
     const [isThinking, setIsThinking] = useState(false);
     const [closingNarration, setClosingNarration] = useState<string | null>(null);
 
+    // WebSocket & audio refs
     const wsRef = useRef<WebSocket | null>(null);
     const micCtxRef = useRef<AudioContext | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
@@ -69,10 +85,27 @@ export function useStoryBuilder(sessionId: string) {
     const statusRef = useRef<BuilderStatus>('disconnected');
     const nextPlayTimeRef = useRef<number>(0);
 
+    // Reconnection refs
+    const intentionalDisconnectRef = useRef(false);
+    const reconnectAttemptRef = useRef(0);
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sessionContextRef = useRef<StorySessionContext | null>(null);
+    // Refs for current state (accessed inside reconnect without stale closures)
+    const panelsRef = useRef<ComicPanelState[]>([]);
+    const scoreRef = useRef(0);
+
     useEffect(() => {
         isThinkingRef.current = isThinking;
         statusRef.current = status;
     }, [isThinking, status]);
+
+    useEffect(() => {
+        panelsRef.current = panels;
+    }, [panels]);
+
+    useEffect(() => {
+        scoreRef.current = score;
+    }, [score]);
 
     const handleBackendEvent = useCallback((event: Record<string, unknown>) => {
         const type = event.type as string;
@@ -247,8 +280,112 @@ export function useStoryBuilder(sessionId: string) {
         }
     }, []);
 
+    // Shared message handler setup — used by both connect and reconnect
+    const setupWsHandlers = useCallback((ws: WebSocket) => {
+        ws.onmessage = async (event) => {
+            let data: Record<string, unknown>;
+            if (event.data instanceof Blob) {
+                const text = await event.data.text();
+                data = JSON.parse(text);
+            } else {
+                data = JSON.parse(event.data as string);
+            }
+
+            if (data.backendEvent) {
+                handleBackendEvent(data.backendEvent as Record<string, unknown>);
+                return;
+            }
+
+            if (data.serverContent) {
+                const sc = data.serverContent as Record<string, unknown>;
+                const modelTurn = sc.modelTurn as Record<string, unknown> | undefined;
+                if (modelTurn?.parts) {
+                    for (const part of modelTurn.parts as Record<string, unknown>[]) {
+                        if (part.inlineData) {
+                            const inlineData = part.inlineData as Record<string, unknown>;
+                            if (inlineData.data) {
+                                await playAudioChunk(inlineData.data as string);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        ws.onerror = (e) => {
+            console.error('[Builder] WebSocket error', e);
+            stopMicrophone(); // Fix: prevent audio context leak
+        };
+
+        ws.onclose = () => {
+            stopMicrophone();
+            if (intentionalDisconnectRef.current) {
+                setStatus('disconnected');
+                return;
+            }
+            // Unexpected disconnect — auto-reconnect with exponential backoff
+            if (reconnectAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
+                const delay = BACKOFF_BASE_MS * Math.pow(2, reconnectAttemptRef.current);
+                reconnectAttemptRef.current += 1;
+                console.log(`[Builder] Reconnecting in ${delay}ms (attempt ${reconnectAttemptRef.current}/${MAX_RECONNECT_ATTEMPTS})`);
+                setStatus('reconnecting');
+                reconnectTimerRef.current = setTimeout(() => {
+                    doReconnect();
+                }, delay);
+            } else {
+                console.log('[Builder] Max reconnect attempts reached');
+                setStatus('error');
+            }
+        };
+    }, [handleBackendEvent, playAudioChunk, stopMicrophone]);
+
+    // Internal reconnect — preserves all state, sends resume prompt
+    const doReconnect = useCallback(() => {
+        const ctx = sessionContextRef.current;
+        if (!ctx) {
+            setStatus('error');
+            return;
+        }
+
+        try {
+            setStatus('reconnecting');
+            // New session ID to avoid server-side collision with the dying old connection
+            const newSessionId = Math.random().toString(36).substring(7);
+            const url = `ws://localhost:8000/api/build/${newSessionId}`;
+            const ws = new WebSocket(url);
+            wsRef.current = ws;
+
+            ws.onopen = async () => {
+                console.log('[Builder] Reconnected successfully');
+                setStatus('connected');
+                setBuilderPhase('building');
+                reconnectAttemptRef.current = 0;
+                await startMicrophone(ws);
+
+                // Send resume prompt with full context so Gemini picks up where we left off
+                const resumePrompt = buildResumePrompt(ctx, panelsRef.current, scoreRef.current);
+                ws.send(JSON.stringify({
+                    clientContent: {
+                        turns: [{ role: 'user', parts: [{ text: resumePrompt }] }],
+                        turnComplete: true
+                    }
+                }));
+            };
+
+            setupWsHandlers(ws);
+        } catch (error) {
+            console.error('[Builder] Reconnect error:', error);
+            setStatus('error');
+        }
+    }, [startMicrophone, setupWsHandlers]);
+
+    // Fresh connect — resets all state, starts a new story
     const connect = useCallback(async (ctx: StorySessionContext) => {
         try {
+            intentionalDisconnectRef.current = false;
+            reconnectAttemptRef.current = 0;
+            sessionContextRef.current = ctx;
+
             setStatus('connecting');
             setBuilderPhase('connecting');
             setPanels([]);
@@ -265,7 +402,6 @@ export function useStoryBuilder(sessionId: string) {
                 setBuilderPhase('building');
                 await startMicrophone(ws);
 
-                // Send initial story context so Gemini can start building immediately
                 ws.send(JSON.stringify({
                     clientContent: {
                         turns: [{
@@ -277,60 +413,40 @@ export function useStoryBuilder(sessionId: string) {
                 }));
             };
 
-            ws.onmessage = async (event) => {
-                let data: Record<string, unknown>;
-                if (event.data instanceof Blob) {
-                    const text = await event.data.text();
-                    data = JSON.parse(text);
-                } else {
-                    data = JSON.parse(event.data as string);
-                }
-
-                if (data.backendEvent) {
-                    handleBackendEvent(data.backendEvent as Record<string, unknown>);
-                    return;
-                }
-
-                if (data.serverContent) {
-                    const sc = data.serverContent as Record<string, unknown>;
-                    const modelTurn = sc.modelTurn as Record<string, unknown> | undefined;
-                    if (modelTurn?.parts) {
-                        for (const part of modelTurn.parts as Record<string, unknown>[]) {
-                            if (part.inlineData) {
-                                const inlineData = part.inlineData as Record<string, unknown>;
-                                if (inlineData.data) {
-                                    await playAudioChunk(inlineData.data as string);
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-            ws.onerror = (e) => {
-                console.error('[Builder] WebSocket error', e);
-                setStatus('error');
-            };
-
-            ws.onclose = () => {
-                setStatus('disconnected');
-                stopMicrophone();
-            };
+            setupWsHandlers(ws);
         } catch (error) {
             console.error('[Builder] Connect error:', error);
             setStatus('error');
         }
-    }, [sessionId, handleBackendEvent, playAudioChunk, startMicrophone, stopMicrophone]);
+    }, [sessionId, startMicrophone, setupWsHandlers]);
 
+    // Intentional disconnect — no auto-reconnect
     const disconnect = useCallback(() => {
+        intentionalDisconnectRef.current = true;
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
         wsRef.current?.close();
         wsRef.current = null;
         stopMicrophone();
         setStatus('disconnected');
     }, [stopMicrophone]);
 
+    // Manual retry after max reconnect attempts exhausted
+    const manualReconnect = useCallback(() => {
+        reconnectAttemptRef.current = 0;
+        intentionalDisconnectRef.current = false;
+        doReconnect();
+    }, [doReconnect]);
+
+    // Cleanup on unmount
     useEffect(() => {
-        return () => disconnect();
+        return () => {
+            intentionalDisconnectRef.current = true;
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            disconnect();
+        };
     }, [disconnect]);
 
     const submitQuizAnswer = useCallback((selectedIndex: number) => {
@@ -376,5 +492,6 @@ export function useStoryBuilder(sessionId: string) {
         sendText,
         submitQuizAnswer,
         getVolume,
+        manualReconnect,
     };
 }

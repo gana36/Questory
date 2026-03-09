@@ -121,7 +121,7 @@ export function CreateStoryPage() {
     const [isSubmittingTopic, setIsSubmittingTopic] = useState(false);
 
     // AI hook integration
-    const { status, gamePhase, setGamePhase, connect, disconnect, isThinking, sendText, getVolume } = useGeminiLive({
+    const { status, gamePhase, setGamePhase, connect, disconnect, isThinking, sendText, getVolume, manualReconnect } = useGeminiLive({
         onMessage: () => {
             setIsSubmittingTopic(false);
         },
@@ -137,18 +137,26 @@ export function CreateStoryPage() {
                 if (existing) {
                     return prev.map(h => h.id === heroId ? { ...h, imageUrl } : h);
                 } else {
-                    // It's a custom hero that wasn't in the initial list
                     return [...prev, { id: heroId, name: 'Custom Hero', description: 'Your unique creation!', imageUrl }];
                 }
             });
         },
         onCustomHeroGenerating: (heroId, name) => {
-            // Add a placeholder for the custom hero while it generates, if not already there
             setHeroes(prev => {
                 if (prev.find(h => h.id === heroId)) return prev;
                 return [...prev, { id: heroId, name, description: 'Generating your custom hero...' }];
             });
-        }
+        },
+        onReconnected: () => {
+            const heroNames = heroes.map(h => h.name).join(', ');
+            sendText(`[CONTEXT RESUME] Setting up a story adventure.
+Topic: ${topic}
+Story Concept: ${storyConcept}
+Heroes proposed: ${heroNames}
+Selected hero: ${character}
+Current phase: ${gamePhase}
+Please continue from the ${gamePhase} phase.`);
+        },
     });
 
     const isConnected = status === 'connected';
@@ -267,6 +275,22 @@ export function CreateStoryPage() {
 
             {/* Central Voice Avatar - Floating at bottom right */}
             <div className="absolute bottom-8 right-8 z-50 flex flex-col items-end gap-2 group">
+                {/* Reconnecting badge */}
+                {status === 'reconnecting' && (
+                    <div className="flex items-center gap-1.5 bg-amber-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg animate-pulse">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Reconnecting...
+                    </div>
+                )}
+
+                {/* Error retry indicator */}
+                {status === 'error' && (
+                    <div
+                        onClick={manualReconnect}
+                        className="flex items-center gap-1.5 bg-red-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg cursor-pointer hover:bg-red-600 transition-colors"
+                    >
+                        Connection lost — Tap to retry
+                    </div>
+                )}
                 {isConnected ? (
                     <div
                         ref={avatarRef}

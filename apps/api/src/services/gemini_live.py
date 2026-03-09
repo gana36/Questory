@@ -103,6 +103,7 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
     # Shared flag to signal when the client has disconnected,
     # preventing the Gemini receiver from writing to a closed WebSocket.
     client_disconnected = asyncio.Event()
+    pending_tasks: set[asyncio.Task] = set()
 
     async def safe_send(payload: dict):
         """Send JSON to the client WebSocket, but only if still connected."""
@@ -337,7 +338,9 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                         
                                         # Fire off the generation tasks without blocking the main loop
                                         for h in parsed_heroes:
-                                            asyncio.create_task(generate_and_send(h))
+                                            task = asyncio.create_task(generate_and_send(h))
+                                            pending_tasks.add(task)
+                                            task.add_done_callback(pending_tasks.discard)
 
                                         # 3. Tell Gemini we showed the options
                                         await gemini_session.send_tool_response(
@@ -394,7 +397,14 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                 receive_from_client(),
                 receive_from_gemini()
             )
-            
+
+            # Cancel any in-flight image generation tasks
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                print(f"[{session_id}] Cancelled {len(pending_tasks)} pending tasks")
+
             print(f"[{session_id}] Session ended cleanly")
 
     except Exception as e:

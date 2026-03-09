@@ -26,6 +26,7 @@ export function StoryBuilderPage() {
         sendText,
         submitQuizAnswer,
         getVolume,
+        manualReconnect,
     } = useStoryBuilder(sessionId ?? 'default');
 
     const [textInput, setTextInput] = useState('');
@@ -328,6 +329,37 @@ export function StoryBuilderPage() {
                     {/* Score badge */}
                     <div className="hidden sm:flex bg-yellow-400 border-2 border-black rounded-full px-3 py-1.5 font-comic text-sm text-black font-bold whitespace-nowrap">
                         ⭐ {score}
+                    </div>
+                </div>
+            )}
+
+            {/* ── Reconnecting Overlay ── */}
+            {status === 'reconnecting' && (
+                <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+                    <div className="bg-white border-4 border-black rounded-2xl p-8 max-w-xs text-center shadow-xl">
+                        <Loader2 className="w-10 h-10 mx-auto mb-3 text-amber-500 animate-spin" />
+                        <h2 className="font-comic text-2xl text-black mb-1">RECONNECTING...</h2>
+                        <p className="text-slate-600 text-sm">The story guide is coming back.</p>
+                        <p className="text-slate-500 text-xs mt-1">Your panels are safe!</p>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Connection Lost Overlay ── */}
+            {status === 'error' && panels.length > 0 && (
+                <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+                    <div className="bg-white border-4 border-black rounded-2xl p-8 max-w-xs text-center shadow-xl">
+                        <div className="text-4xl mb-3">📡</div>
+                        <h2 className="font-comic text-2xl text-black mb-1">CONNECTION LOST</h2>
+                        <p className="text-slate-600 text-sm mb-4">
+                            Your {panels.length} {panels.length === 1 ? 'panel' : 'panels'} and score are saved!
+                        </p>
+                        <button
+                            onClick={manualReconnect}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-comic text-lg px-6 py-2 rounded-xl border-2 border-black transition-colors"
+                        >
+                            Tap to Retry
+                        </button>
                     </div>
                 </div>
             )}

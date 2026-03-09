@@ -1,20 +1,22 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
-type GeminiLiveStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-type GamePhase = 'topic' | 'heroes' | 'style' | 'settings' | 'ready'; // Added phases for game UI
+type GeminiLiveStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+type GamePhase = 'topic' | 'heroes' | 'style' | 'settings' | 'ready';
 
 interface UseGeminiLiveProps {
     onMessage?: (text: string, isFinal: boolean) => void;
     onFunctionCall?: (name: string, args: any) => void;
-    // New callback to receive image updates from the proxy backend
     onSceneUpdate?: (imageUrl: string) => void;
     onHeroesProposed?: (concept: string, heroes: any[]) => void;
     onHeroImageGenerated?: (heroId: string, imageUrl: string) => void;
     onCustomHeroGenerating?: (heroId: string, name: string) => void;
+    onReconnected?: () => void;
 }
 
-export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating }: UseGeminiLiveProps = {}) {
-    // ... [Status hooks mostly unchanged]
+const MAX_RECONNECT_ATTEMPTS = 3;
+const BACKOFF_BASE_MS = 1000;
+
+export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onReconnected }: UseGeminiLiveProps = {}) {
     const [status, setStatus] = useState<GeminiLiveStatus>('disconnected');
     const [gamePhase, setGamePhase] = useState<GamePhase>('topic');
     const [isThinking, setIsThinking] = useState(false);
@@ -29,6 +31,31 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
     const isThinkingRef = useRef(false);
     const statusRef = useRef(status);
 
+    // Reconnection refs
+    const intentionalDisconnectRef = useRef(false);
+    const reconnectAttemptRef = useRef(0);
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastSystemInstructionRef = useRef<string | undefined>(undefined);
+
+    // Store callbacks in refs so ws handlers always see the latest
+    const onMessageRef = useRef(onMessage);
+    const onFunctionCallRef = useRef(onFunctionCall);
+    const onSceneUpdateRef = useRef(onSceneUpdate);
+    const onHeroesProposedRef = useRef(onHeroesProposed);
+    const onHeroImageGeneratedRef = useRef(onHeroImageGenerated);
+    const onCustomHeroGeneratingRef = useRef(onCustomHeroGenerating);
+    const onReconnectedRef = useRef(onReconnected);
+
+    useEffect(() => {
+        onMessageRef.current = onMessage;
+        onFunctionCallRef.current = onFunctionCall;
+        onSceneUpdateRef.current = onSceneUpdate;
+        onHeroesProposedRef.current = onHeroesProposed;
+        onHeroImageGeneratedRef.current = onHeroImageGenerated;
+        onCustomHeroGeneratingRef.current = onCustomHeroGenerating;
+        onReconnectedRef.current = onReconnected;
+    }, [onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onReconnected]);
+
     useEffect(() => {
         isThinkingRef.current = isThinking;
         statusRef.current = status;
@@ -36,114 +63,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
 
     const nextPlayTimeRef = useRef<number>(0);
 
-    const connect = useCallback(async (systemInstruction?: string) => {
-        try {
-            setStatus('connecting');
-
-            // Hardcode a session ID for demo purposes, or pass it in later
-            const sessionId = Math.random().toString(36).substring(7);
-            const url = `ws://localhost:8000/api/live/${sessionId}`;
-
-            const ws = new WebSocket(url);
-            wsRef.current = ws;
-
-            ws.onopen = async () => {
-                setStatus('connected');
-                // The backend handles sending the configuration setup message.
-                // It automatically builds the Session config with instructions & tools.
-                // We just start pushing Audio!
-                await startMicrophone(ws);
-
-                // If there's an initial instruction (like for the Create page), send it as a text turn
-                if (systemInstruction) {
-                    ws.send(JSON.stringify({
-                        clientContent: {
-                            turns: [{
-                                role: "user",
-                                parts: [{ text: systemInstruction }]
-                            }],
-                            turnComplete: true
-                        }
-                    }));
-                }
-            };
-
-            ws.onmessage = async (event) => {
-                let data;
-                if (event.data instanceof Blob) {
-                    const text = await event.data.text();
-                    data = JSON.parse(text);
-                } else {
-                    data = JSON.parse(event.data);
-                }
-
-                // 1. Handle Custom Proxy Events (ex: Nano Banana images)
-                if (data.backendEvent) {
-                    const eventType = data.backendEvent.type;
-
-                    if (eventType === 'scene_update' && data.backendEvent.imageUrl) {
-                        onSceneUpdate?.(data.backendEvent.imageUrl);
-                    } else if (eventType === 'image_generation_started') {
-                        setIsThinking(true); // show the UI generating state
-                    } else if (eventType === 'heroes_proposed') {
-                        onHeroesProposed?.(data.backendEvent.concept, data.backendEvent.heroes);
-                    } else if (eventType === 'hero_image_generated') {
-                        onHeroImageGenerated?.(data.backendEvent.id, data.backendEvent.imageUrl);
-                    } else if (eventType === 'custom_hero_generating') {
-                        onCustomHeroGenerating?.(data.backendEvent.id, data.backendEvent.name);
-                    }
-                    return;
-                }
-
-                // 2. Handle standard Gemini format (relayed by proxy)
-                if (data.serverContent) {
-                    const modelTurn = data.serverContent.modelTurn;
-                    if (modelTurn) {
-                        for (const part of modelTurn.parts) {
-                            if (part.text) {
-                                onMessage?.(part.text, false);
-                            }
-                            if (part.inlineData && part.inlineData.data) {
-                                await playAudioChunk(part.inlineData.data);
-                            }
-                        }
-                    }
-                    // isThinking clears via source.onended when playback finishes
-                }
-
-                if (data.toolCall) {
-                    for (const call of data.toolCall.functionCalls) {
-                        onFunctionCall?.(call.name, call.args);
-                    }
-
-                    // For frontend tools, we still reply via the proxy
-                    ws.send(JSON.stringify({
-                        toolResponse: {
-                            functionResponses: data.toolCall.functionCalls.map((c: any) => ({
-                                id: c.id,
-                                name: c.name,
-                                response: { result: "ok" }
-                            }))
-                        }
-                    }));
-                }
-            };
-
-            ws.onerror = (e) => {
-                console.error('WebSocket Error', e);
-                setStatus('error');
-            };
-
-            ws.onclose = () => {
-                setStatus('disconnected');
-                stopMicrophone();
-            };
-
-        } catch (error) {
-            console.error(error);
-            setStatus('error');
-        }
-    }, [onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating]);
+    // --- Audio helpers ---
 
     const playAudioChunk = async (base64Data: string) => {
         if (!audioContextRef.current) return;
@@ -156,7 +76,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             for (let i = 0; i < len; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
             }
-            // Gemini Live return 24kHz PCM by default for Aoede
             const pcm16 = new Int16Array(bytes.buffer);
             const audioBuffer = ctx.createBuffer(1, pcm16.length, 24000);
             const channelData = audioBuffer.getChannelData(0);
@@ -164,7 +83,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
                 channelData[i] = pcm16[i] / 32768.0;
             }
 
-            // Resume the AudioContext if the browser suspended it (autoplay policy)
             if (ctx.state === 'suspended') {
                 console.warn('[Audio] AudioContext was suspended, resuming...');
                 await ctx.resume();
@@ -184,7 +102,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             source.start(playTime);
             nextPlayTimeRef.current = playTime + audioBuffer.duration;
 
-            // Show "Thinking/Speaking" state while audio is playing; clear when the last chunk finishes
             setIsThinking(true);
             source.onended = () => {
                 if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) {
@@ -211,17 +128,14 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             mediaStreamRef.current = stream;
             console.log('[Mic] Got media stream:', stream.getAudioTracks()[0]?.getSettings());
 
-            // Use a SEPARATE AudioContext for mic capture at 16kHz
             const micCtx = new window.AudioContext({ sampleRate: 16000 });
             micCtxRef.current = micCtx;
             console.log('[Mic] Mic AudioContext created. Actual sample rate:', micCtx.sampleRate);
 
-            // Create the playback AudioContext at 24kHz (Gemini's output rate)
             const playbackCtx = new window.AudioContext({ sampleRate: 24000 });
             audioContextRef.current = playbackCtx;
             nextPlayTimeRef.current = playbackCtx.currentTime;
 
-            // Setup Playback Analyser for AI Voice visualization
             const playbackAnalyser = playbackCtx.createAnalyser();
             playbackAnalyser.fftSize = 256;
             playbackAnalyser.connect(playbackCtx.destination);
@@ -232,7 +146,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
 
             const source = micCtx.createMediaStreamSource(stream);
 
-            // Setup Mic Analyser for User Voice visualization
             const micAnalyser = micCtx.createAnalyser();
             micAnalyser.fftSize = 256;
             source.connect(micAnalyser);
@@ -242,7 +155,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
 
             let chunkCount = 0;
             processor.port.onmessage = (e) => {
-                const pcm16Data = e.data; // Int16Array
+                const pcm16Data = e.data;
                 const base64Str = btoa(String.fromCharCode(...new Uint8Array(pcm16Data.buffer)));
 
                 chunkCount++;
@@ -263,8 +176,6 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             };
 
             source.connect(processor);
-            // Don't connect processor to destination — we don't want to hear our own mic
-            // processor.connect(micCtx.destination);
             processorNodeRef.current = processor;
             console.log('[Mic] Audio pipeline connected. Listening for audio data...');
 
@@ -273,7 +184,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
         }
     };
 
-    const stopMicrophone = () => {
+    const stopMicrophone = useCallback(() => {
         if (mediaStreamRef.current) {
             mediaStreamRef.current.getTracks().forEach(track => track.stop());
             mediaStreamRef.current = null;
@@ -290,23 +201,210 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             audioContextRef.current.close().catch(console.error);
             audioContextRef.current = null;
         }
-    };
+        playbackAnalyserRef.current = null;
+        micAnalyserRef.current = null;
+    }, []);
+
+    // --- WebSocket handler setup (shared between connect and reconnect) ---
+
+    const setupWsHandlers = useCallback((ws: WebSocket, isReconnect: boolean) => {
+        ws.onopen = async () => {
+            console.log(`[GeminiLive] WebSocket opened (${isReconnect ? 'reconnect' : 'fresh'})`);
+            setStatus('connected');
+            reconnectAttemptRef.current = 0;
+            await startMicrophone(ws);
+
+            if (isReconnect) {
+                onReconnectedRef.current?.();
+            }
+        };
+
+        ws.onmessage = async (event) => {
+            let data;
+            if (event.data instanceof Blob) {
+                const text = await event.data.text();
+                data = JSON.parse(text);
+            } else {
+                data = JSON.parse(event.data);
+            }
+
+            // Handle backend events
+            if (data.backendEvent) {
+                const eventType = data.backendEvent.type;
+
+                if (eventType === 'scene_update' && data.backendEvent.imageUrl) {
+                    onSceneUpdateRef.current?.(data.backendEvent.imageUrl);
+                } else if (eventType === 'image_generation_started') {
+                    setIsThinking(true);
+                } else if (eventType === 'heroes_proposed') {
+                    onHeroesProposedRef.current?.(data.backendEvent.concept, data.backendEvent.heroes);
+                } else if (eventType === 'hero_image_generated') {
+                    onHeroImageGeneratedRef.current?.(data.backendEvent.id, data.backendEvent.imageUrl);
+                } else if (eventType === 'custom_hero_generating') {
+                    onCustomHeroGeneratingRef.current?.(data.backendEvent.id, data.backendEvent.name);
+                }
+                return;
+            }
+
+            // Handle standard Gemini format
+            if (data.serverContent) {
+                const modelTurn = data.serverContent.modelTurn;
+                if (modelTurn) {
+                    for (const part of modelTurn.parts) {
+                        if (part.text) {
+                            onMessageRef.current?.(part.text, false);
+                        }
+                        if (part.inlineData && part.inlineData.data) {
+                            await playAudioChunk(part.inlineData.data);
+                        }
+                    }
+                }
+            }
+
+            if (data.toolCall) {
+                for (const call of data.toolCall.functionCalls) {
+                    onFunctionCallRef.current?.(call.name, call.args);
+                }
+
+                ws.send(JSON.stringify({
+                    toolResponse: {
+                        functionResponses: data.toolCall.functionCalls.map((c: any) => ({
+                            id: c.id,
+                            name: c.name,
+                            response: { result: "ok" }
+                        }))
+                    }
+                }));
+            }
+        };
+
+        ws.onerror = (e) => {
+            console.error('[GeminiLive] WebSocket error', e);
+            stopMicrophone();
+        };
+
+        ws.onclose = () => {
+            console.log('[GeminiLive] WebSocket closed');
+            stopMicrophone();
+
+            if (intentionalDisconnectRef.current) {
+                setStatus('disconnected');
+                return;
+            }
+
+            // Unexpected disconnect — auto-reconnect with backoff
+            if (reconnectAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
+                const delay = BACKOFF_BASE_MS * Math.pow(2, reconnectAttemptRef.current);
+                reconnectAttemptRef.current += 1;
+                setStatus('reconnecting');
+                console.log(`[GeminiLive] Reconnecting in ${delay}ms (attempt ${reconnectAttemptRef.current}/${MAX_RECONNECT_ATTEMPTS})`);
+                reconnectTimerRef.current = setTimeout(() => doReconnect(), delay);
+            } else {
+                setStatus('error');
+            }
+        };
+    }, [stopMicrophone]);
+
+    // --- Connect (fresh start) ---
+
+    const connect = useCallback(async (systemInstruction?: string) => {
+        try {
+            setStatus('connecting');
+            intentionalDisconnectRef.current = false;
+            reconnectAttemptRef.current = 0;
+            lastSystemInstructionRef.current = systemInstruction;
+
+            const sessionId = Math.random().toString(36).substring(7);
+            const url = `ws://localhost:8000/api/live/${sessionId}`;
+
+            const ws = new WebSocket(url);
+            wsRef.current = ws;
+
+            // Override onopen to also send the initial system instruction
+            setupWsHandlers(ws, false);
+            const originalOnOpen = ws.onopen;
+            ws.onopen = async (event) => {
+                await (originalOnOpen as any)?.call(ws, event);
+                if (systemInstruction && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        clientContent: {
+                            turns: [{
+                                role: "user",
+                                parts: [{ text: systemInstruction }]
+                            }],
+                            turnComplete: true
+                        }
+                    }));
+                }
+            };
+
+        } catch (error) {
+            console.error(error);
+            setStatus('error');
+        }
+    }, [setupWsHandlers]);
+
+    // --- Reconnect (preserves external state, page sends context resume via onReconnected) ---
+
+    const doReconnect = useCallback(() => {
+        try {
+            setStatus('reconnecting');
+
+            // Close old WS cleanly if still lingering
+            if (wsRef.current) {
+                try { wsRef.current.close(); } catch { /* ignore */ }
+                wsRef.current = null;
+            }
+
+            const sessionId = Math.random().toString(36).substring(7);
+            const url = `ws://localhost:8000/api/live/${sessionId}`;
+
+            const ws = new WebSocket(url);
+            wsRef.current = ws;
+
+            // setupWsHandlers with isReconnect=true will call onReconnected on open
+            setupWsHandlers(ws, true);
+
+        } catch (error) {
+            console.error('[GeminiLive] Reconnect failed:', error);
+            setStatus('error');
+        }
+    }, [setupWsHandlers]);
+
+    // --- Disconnect (intentional) ---
 
     const disconnect = useCallback(() => {
+        intentionalDisconnectRef.current = true;
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
         if (wsRef.current) {
             wsRef.current.close();
             wsRef.current = null;
         }
         stopMicrophone();
         setStatus('disconnected');
-    }, []);
+    }, [stopMicrophone]);
+
+    // --- Manual reconnect (exposed for retry button) ---
+
+    const manualReconnect = useCallback(() => {
+        reconnectAttemptRef.current = 0;
+        intentionalDisconnectRef.current = false;
+        doReconnect();
+    }, [doReconnect]);
 
     // Cleanup on unmount
     useEffect(() => {
-        return () => disconnect();
+        return () => {
+            intentionalDisconnectRef.current = true;
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            disconnect();
+        };
     }, [disconnect]);
 
-    // Send a client text turn for interrupting or initial prompts
+    // Send a client text turn
     const sendText = useCallback((text: string) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({
@@ -333,10 +431,10 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             const dataArray = new Uint8Array(micAnalyserRef.current.frequencyBinCount);
             micAnalyserRef.current.getByteFrequencyData(dataArray);
             const sum = dataArray.reduce((acc, val) => acc + val, 0);
-            maxVolume = (sum / dataArray.length / 128) * 1.5; // Boost mic visually
+            maxVolume = (sum / dataArray.length / 128) * 1.5;
         }
         return Math.min(maxVolume, 1.0);
     }, []);
 
-    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking, getVolume };
+    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking, getVolume, manualReconnect };
 }
