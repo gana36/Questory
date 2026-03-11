@@ -2,11 +2,14 @@ import json
 import base64
 import asyncio
 import os
+import re
 from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
 
 from src.services.image_gen import generate_image
+from src.services.story_headstart import ensure_story_headstart
+from src.services.story_session_store import save_story_session
 
 # Common Configuration for the Story Gemini
 SCENE_SYSTEM_INSTRUCTION = """
@@ -21,7 +24,8 @@ Follow this flow strictly:
 5. YOU MUST CALL the `propose_heroes` tool with the concept and the 3 hero options.
 6. Then, ask the user which hero they want to be, or if they want to create their own custom hero.
 7. If they ask for a custom hero, YOU MUST CALL the `generate_custom_hero` tool, then excitedly confirm their choice.
-8. Once a hero is chosen, ask them if they are ready to start the adventure.
+8. As soon as the user clearly chooses a final hero, YOU MUST CALL the `start_comic_builder` tool with that hero and the story concept.
+9. After calling `start_comic_builder`, give a short magical launch line and stop the setup flow.
 
 Keep all spoken responses under 3 sentences. Be energetic and magical!
 """
@@ -83,6 +87,24 @@ TOOLS = [
                     },
                     "required": ["id", "name", "visual_description"]
                 }
+            },
+            {
+                "name": "start_comic_builder",
+                "description": "Call this as soon as the child has clearly chosen the hero they want to play so the app can enter comic builder mode.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "hero_name": {
+                            "type": "STRING",
+                            "description": "The final chosen hero name."
+                        },
+                        "concept": {
+                            "type": "STRING",
+                            "description": "The story concept that should anchor the comic story."
+                        }
+                    },
+                    "required": ["hero_name", "concept"]
+                }
             }
         ]
     }
@@ -91,6 +113,19 @@ TOOLS = [
 # --- Live API Config ---
 # The model must support bidiGenerateContent. Use a native audio model.
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+
+def extract_topic_from_setup_text(text: str) -> str:
+    patterns = [
+        r"I want the topic to be:\s*(.+?)(?:\.\s*Please propose 3 heroes using the propose_heroes tool now\.)?$",
+        r"I have a YouTube video link:\s*(.+?)(?:\.\s*Please use this to create the concept for our story\.)?$",
+        r'I have uploaded a PDF document named "(.+?)"(?:\.\s*Please use this to create the concept for our story\.)?$',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return text.strip()
 
 
 async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
@@ -104,6 +139,7 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
     # preventing the Gemini receiver from writing to a closed WebSocket.
     client_disconnected = asyncio.Event()
     pending_tasks: set[asyncio.Task] = set()
+    latest_user_topic: str | None = None
 
     async def safe_send(payload: dict):
         """Send JSON to the client WebSocket, but only if still connected."""
@@ -142,6 +178,7 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
 
             # Task 1: Read from Frontend WebSocket -> Send to Gemini
             async def receive_from_client():
+                nonlocal latest_user_topic
                 audio_chunk_count = 0
                 try:
                     while True:
@@ -175,6 +212,13 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                 text_parts = [p["text"] for p in turn["parts"] if "text" in p]
                                 if text_parts:
                                     text = " ".join(text_parts)
+                                    lower_text = text.lower()
+                                    if (
+                                        "i want the topic to be:" in lower_text
+                                        or "youtube video link:" in lower_text
+                                        or "uploaded a pdf document named" in lower_text
+                                    ):
+                                        latest_user_topic = extract_topic_from_setup_text(text)
                                     content = types.Content(
                                         parts=[types.Part.from_text(text=text)],
                                         role="user"
@@ -309,6 +353,20 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                             else:
                                                 parsed_heroes.append(dict(h)) # Attempt coercion
 
+                                        save_story_session(session_id, {
+                                            "setupSessionId": session_id,
+                                            "topic": latest_user_topic or "",
+                                            "storyConcept": concept,
+                                            "heroes": [
+                                                {
+                                                    "id": h.get("id", f"hero_{i}"),
+                                                    "name": h.get("name", "Unknown"),
+                                                    "description": h.get("description", ""),
+                                                }
+                                                for i, h in enumerate(parsed_heroes)
+                                            ],
+                                        })
+
                                         # 1. Immediately send the text concepts to the frontend
                                         await safe_send({
                                             "backendEvent": {
@@ -357,6 +415,10 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                         custom_id = args.get("id", "custom_hero")
                                         hero_name = args.get("name", "Custom Hero")
                                         visual_desc = args.get("visual_description", "")
+
+                                        save_story_session(session_id, {
+                                            "selectedHero": hero_name,
+                                        })
                                         
                                         await safe_send({
                                             "backendEvent": {
@@ -383,6 +445,51 @@ async def proxy_gemini_live_session(client_ws: WebSocket, session_id: str):
                                                     name=name,
                                                     id=function_call.id,
                                                     response={"result": "Custom hero image generated successfully."}
+                                                )
+                                            ]
+                                        )
+
+                                    elif name == "start_comic_builder":
+                                        hero_name = args.get("hero_name", "").strip()
+                                        concept = args.get("concept", "").strip()
+
+                                        save_story_session(session_id, {
+                                            "setupSessionId": session_id,
+                                            "topic": latest_user_topic or "",
+                                            "storyConcept": concept,
+                                            "selectedHero": hero_name,
+                                            "artStyle": "comic",
+                                            "ageRange": 2,
+                                            "quizFrequency": "after each teaching panel",
+                                            "storyHeadstartStatus": "pending",
+                                            "storyHeadstartError": "",
+                                        })
+
+                                        ensure_story_headstart(
+                                            session_id=session_id,
+                                            topic=latest_user_topic or "",
+                                            concept=concept,
+                                            hero_name=hero_name,
+                                            art_style="comic",
+                                            age_range=2,
+                                            quiz_frequency="after each teaching panel",
+                                        )
+
+                                        await safe_send({
+                                            "backendEvent": {
+                                                "type": "comic_builder_requested",
+                                                "heroName": hero_name,
+                                                "concept": concept,
+                                                "buildSessionId": session_id,
+                                            }
+                                        })
+
+                                        await gemini_session.send_tool_response(
+                                            function_responses=[
+                                                types.FunctionResponse(
+                                                    name=name,
+                                                    id=function_call.id,
+                                                    response={"result": "Comic builder launch request sent."}
                                                 )
                                             ]
                                         )

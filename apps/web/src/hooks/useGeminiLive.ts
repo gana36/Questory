@@ -10,16 +10,18 @@ interface UseGeminiLiveProps {
     onHeroesProposed?: (concept: string, heroes: any[]) => void;
     onHeroImageGenerated?: (heroId: string, imageUrl: string) => void;
     onCustomHeroGenerating?: (heroId: string, name: string) => void;
+    onComicBuilderRequested?: (heroName: string, concept: string, buildSessionId: string) => void;
     onReconnected?: () => void;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 1000;
 
-export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onReconnected }: UseGeminiLiveProps = {}) {
+export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onComicBuilderRequested, onReconnected }: UseGeminiLiveProps = {}) {
     const [status, setStatus] = useState<GeminiLiveStatus>('disconnected');
     const [gamePhase, setGamePhase] = useState<GamePhase>('topic');
     const [isThinking, setIsThinking] = useState(false);
+    const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
     const wsRef = useRef<WebSocket | null>(null);
     const micCtxRef = useRef<AudioContext | null>(null);
@@ -46,6 +48,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
     const onHeroesProposedRef = useRef(onHeroesProposed);
     const onHeroImageGeneratedRef = useRef(onHeroImageGenerated);
     const onCustomHeroGeneratingRef = useRef(onCustomHeroGenerating);
+    const onComicBuilderRequestedRef = useRef(onComicBuilderRequested);
     const onReconnectedRef = useRef(onReconnected);
 
     useEffect(() => {
@@ -55,8 +58,9 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
         onHeroesProposedRef.current = onHeroesProposed;
         onHeroImageGeneratedRef.current = onHeroImageGenerated;
         onCustomHeroGeneratingRef.current = onCustomHeroGenerating;
+        onComicBuilderRequestedRef.current = onComicBuilderRequested;
         onReconnectedRef.current = onReconnected;
-    }, [onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onReconnected]);
+    }, [onMessage, onFunctionCall, onSceneUpdate, onHeroesProposed, onHeroImageGenerated, onCustomHeroGenerating, onComicBuilderRequested, onReconnected]);
 
     useEffect(() => {
         isThinkingRef.current = isThinking;
@@ -244,6 +248,12 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
                     onHeroImageGeneratedRef.current?.(data.backendEvent.id, data.backendEvent.imageUrl);
                 } else if (eventType === 'custom_hero_generating') {
                     onCustomHeroGeneratingRef.current?.(data.backendEvent.id, data.backendEvent.name);
+                } else if (eventType === 'comic_builder_requested') {
+                    onComicBuilderRequestedRef.current?.(
+                        data.backendEvent.heroName,
+                        data.backendEvent.concept,
+                        data.backendEvent.buildSessionId
+                    );
                 }
                 return;
             }
@@ -323,6 +333,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             lastSystemInstructionRef.current = systemInstruction;
 
             const sessionId = Math.random().toString(36).substring(7);
+            setCurrentSessionId(sessionId);
             const url = `ws://localhost:8000/api/live/${sessionId}`;
 
             const ws = new WebSocket(url);
@@ -365,6 +376,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             }
 
             const sessionId = Math.random().toString(36).substring(7);
+            setCurrentSessionId(sessionId);
             const url = `ws://localhost:8000/api/live/${sessionId}`;
 
             const ws = new WebSocket(url);
@@ -393,6 +405,7 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             wsRef.current = null;
         }
         stopMicrophone();
+        setCurrentSessionId(null);
         setStatus('disconnected');
     }, [stopMicrophone]);
 
@@ -445,5 +458,5 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
         return Math.min(maxVolume, 1.0);
     }, []);
 
-    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking, getVolume, manualReconnect };
+    return { status, gamePhase, setGamePhase, connect, disconnect, sendText, isThinking, getVolume, manualReconnect, currentSessionId };
 }

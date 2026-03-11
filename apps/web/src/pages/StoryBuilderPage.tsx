@@ -1,17 +1,124 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { Mic, MicOff, Send, BookOpen, Loader2 } from 'lucide-react';
-import { useStoryBuilder, type StorySessionContext } from '@/hooks/useStoryBuilder';
+import {
+    useStoryBuilder,
+    type StoryHeadstart,
+    type StoryHeadstartPanel,
+    type StoryHeadstartStatus,
+    type StorySessionContext,
+} from '@/hooks/useStoryBuilder';
 import { ComicPanel } from '@/components/comic/ComicPanel';
 import { QuizOverlay } from '@/components/comic/QuizOverlay';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
+function normalizeHeadstartPanel(raw: unknown, index: number): StoryHeadstartPanel | null {
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+
+    const panel = raw as Record<string, unknown>;
+    const narration = typeof panel.narration === 'string' ? panel.narration : '';
+    const visualDescription = typeof panel.visual_description === 'string' ? panel.visual_description : '';
+    if (!narration || !visualDescription) {
+        return null;
+    }
+
+    return {
+        panelId: typeof panel.panel_id === 'string' ? panel.panel_id : `panel_${index + 1}`,
+        storyRole: typeof panel.story_role === 'string' ? panel.story_role : 'story',
+        narration,
+        speechBubble: typeof panel.speech_bubble === 'string' ? panel.speech_bubble : undefined,
+        visualDescription,
+        learningObjective: typeof panel.learning_objective === 'string' ? panel.learning_objective : undefined,
+        explanationFocus: typeof panel.explanation_focus === 'string' ? panel.explanation_focus : narration,
+        childQuestion: typeof panel.child_question === 'string' ? panel.child_question : 'What do you think happens next?',
+        questionPurpose: typeof panel.question_purpose === 'string' ? panel.question_purpose : undefined,
+        integrationHint: typeof panel.integration_hint === 'string' ? panel.integration_hint : undefined,
+    };
+}
+
+function normalizeHeadstart(raw: unknown): StoryHeadstart | null {
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+
+    const headstart = raw as Record<string, unknown>;
+    const panels = Array.isArray(headstart.panels)
+        ? headstart.panels
+            .map((panel, index) => normalizeHeadstartPanel(panel, index))
+            .filter((panel): panel is StoryHeadstartPanel => Boolean(panel))
+        : [];
+
+    if (panels.length === 0) {
+        return null;
+    }
+
+    return {
+        title: typeof headstart.title === 'string' ? headstart.title : 'Questory Adventure',
+        storyGoal: typeof headstart.story_goal === 'string' ? headstart.story_goal : 'Learn through the adventure.',
+        openingHook: typeof headstart.opening_hook === 'string' ? headstart.opening_hook : 'A new mission is about to begin.',
+        panelCount: typeof headstart.panel_count === 'number' ? headstart.panel_count : panels.length,
+        panels,
+        closingNarration: typeof headstart.closing_narration === 'string' ? headstart.closing_narration : 'The opening mission is complete.',
+        liveCustomizationBrief: typeof headstart.live_customization_brief === 'string'
+            ? headstart.live_customization_brief
+            : 'Let the child shape what happens next while staying on topic.',
+    };
+}
+
+function mapStorySessionToContext(
+    data: Record<string, unknown>,
+    fallback: StorySessionContext | null
+): StorySessionContext {
+    const normalizedHeadstart = normalizeHeadstart(data.storyHeadstart);
+    const rawStatus = typeof data.storyHeadstartStatus === 'string'
+        ? data.storyHeadstartStatus
+        : fallback?.storyHeadstartStatus;
+    const storyHeadstartStatus: StoryHeadstartStatus = rawStatus === 'ready'
+        || rawStatus === 'failed'
+        || rawStatus === 'generating'
+        || rawStatus === 'pending'
+        ? rawStatus
+        : normalizedHeadstart
+            ? 'ready'
+            : 'pending';
+
+    return {
+        topic: typeof data.topic === 'string' ? data.topic : fallback?.topic ?? '',
+        storyConcept: typeof data.storyConcept === 'string' ? data.storyConcept : fallback?.storyConcept ?? '',
+        heroName: typeof data.selectedHero === 'string'
+            ? data.selectedHero
+            : typeof data.heroName === 'string'
+                ? data.heroName
+                : fallback?.heroName ?? '',
+        artStyle: typeof data.artStyle === 'string' ? data.artStyle : fallback?.artStyle ?? 'comic',
+        ageRange: typeof data.ageRange === 'number' ? data.ageRange : fallback?.ageRange ?? 2,
+        quizFrequency: typeof data.quizFrequency === 'string'
+            ? data.quizFrequency
+            : fallback?.quizFrequency ?? 'after each teaching panel',
+        storyHeadstartStatus,
+        storyHeadstart: normalizedHeadstart ?? fallback?.storyHeadstart ?? null,
+    };
+}
+
 export function StoryBuilderPage() {
     const { sessionId } = useParams<{ sessionId: string }>();
     const location = useLocation();
     const navigate = useNavigate();
-    const storyCtx = location.state as StorySessionContext | null;
+    const [storyCtx, setStoryCtx] = useState<StorySessionContext | null>(() => {
+        const initialState = (location.state as StorySessionContext | null) ?? null;
+        if (!initialState) {
+            return null;
+        }
+        return {
+            ...initialState,
+            storyHeadstartStatus: initialState.storyHeadstartStatus ?? 'pending',
+            storyHeadstart: initialState.storyHeadstart ?? null,
+        };
+    });
+    const [storySessionError, setStorySessionError] = useState<string | null>(null);
 
     const {
         panels,
@@ -40,14 +147,67 @@ export function StoryBuilderPage() {
     const narrationEndRef = useRef<HTMLDivElement>(null);
     const volumeRafRef = useRef<number | null>(null);
 
+    useEffect(() => {
+        if (!sessionId) {
+            return;
+        }
+
+        let cancelled = false;
+        let pollTimer: number | null = null;
+
+        const fetchStorySession = () => {
+            fetch(`http://localhost:8000/api/story-session/${sessionId}`)
+                .then(async (response) => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to load story session (${response.status})`);
+                    }
+                    return response.json();
+                })
+                .then((data) => {
+                    if (cancelled) {
+                        return;
+                    }
+
+                    setStorySessionError(null);
+                    setStoryCtx((prev) => mapStorySessionToContext(data as Record<string, unknown>, prev));
+
+                    const nextStatus = typeof data.storyHeadstartStatus === 'string' ? data.storyHeadstartStatus : null;
+                    if (nextStatus === 'pending' || nextStatus === 'generating') {
+                        pollTimer = window.setTimeout(fetchStorySession, 900);
+                    }
+                })
+                .catch((error) => {
+                    if (cancelled) {
+                        return;
+                    }
+                    console.error('[StoryBuilder] Failed to load backend story session', error);
+                    setStorySessionError(error instanceof Error ? error.message : 'Failed to load story session');
+                });
+        };
+
+        fetchStorySession();
+
+        return () => {
+            cancelled = true;
+            if (pollTimer) {
+                window.clearTimeout(pollTimer);
+            }
+        };
+    }, [sessionId]);
+
     // Auto-connect on mount if we have context
     useEffect(() => {
-        if (storyCtx && sessionId) {
+        if (
+            storyCtx
+            && sessionId
+            && storyCtx.storyHeadstartStatus !== 'pending'
+            && storyCtx.storyHeadstartStatus !== 'generating'
+        ) {
             connect(storyCtx);
         }
         return () => disconnect();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [storyCtx, sessionId]);
 
     // Auto-scroll to latest panel
     useEffect(() => {
@@ -98,19 +258,34 @@ export function StoryBuilderPage() {
     };
 
     // Guard: no context (direct URL navigation)
-    if (!storyCtx) {
+    if (!storyCtx || storyCtx.storyHeadstartStatus === 'pending' || storyCtx.storyHeadstartStatus === 'generating') {
         return (
             <div className="min-h-screen bg-amber-50 flex items-center justify-center p-8">
                 <div className="text-center border-4 border-black rounded-2xl p-8 bg-white max-w-sm">
-                    <BookOpen className="w-12 h-12 mx-auto mb-4 text-slate-400" />
-                    <h2 className="font-comic text-2xl text-black mb-2">No Story Found!</h2>
-                    <p className="text-slate-600 mb-6 text-sm">Please create a story first to use the comic builder.</p>
-                    <button
-                        onClick={() => navigate('/create')}
-                        className="bg-indigo-600 text-white font-comic text-lg px-6 py-2 rounded-xl border-2 border-black"
-                    >
-                        Create a Story
-                    </button>
+                    {sessionId ? (
+                        <>
+                            <Loader2 className="w-12 h-12 mx-auto mb-4 text-indigo-600 animate-spin" />
+                            <h2 className="font-comic text-2xl text-black mb-2">Preparing Story...</h2>
+                            <p className="text-slate-600 mb-2 text-sm">
+                                Building the pre-generated comic headstart before the live guide takes over.
+                            </p>
+                            <p className="text-slate-500 mb-6 text-xs">
+                                {storySessionError ?? 'This usually finishes in a few seconds.'}
+                            </p>
+                        </>
+                    ) : (
+                        <>
+                            <BookOpen className="w-12 h-12 mx-auto mb-4 text-slate-400" />
+                            <h2 className="font-comic text-2xl text-black mb-2">No Story Found!</h2>
+                            <p className="text-slate-600 mb-6 text-sm">Please create a story first to use the comic builder.</p>
+                            <button
+                                onClick={() => navigate('/create')}
+                                className="bg-indigo-600 text-white font-comic text-lg px-6 py-2 rounded-xl border-2 border-black"
+                            >
+                                Create a Story
+                            </button>
+                        </>
+                    )}
                 </div>
             </div>
         );

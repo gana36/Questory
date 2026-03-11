@@ -119,9 +119,10 @@ export function CreateStoryPage() {
     const [inputType, setInputType] = useState<'text' | 'youtube' | 'pdf'>('text');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isSubmittingTopic, setIsSubmittingTopic] = useState(false);
+    const [builderSessionId, setBuilderSessionId] = useState<string | null>(null);
 
     // AI hook integration
-    const { status, gamePhase, setGamePhase, connect, disconnect, isThinking, sendText, getVolume, manualReconnect } = useGeminiLive({
+    const { status, gamePhase, setGamePhase, connect, disconnect, isThinking, sendText, getVolume, manualReconnect, currentSessionId } = useGeminiLive({
         onMessage: () => {
             setIsSubmittingTopic(false);
         },
@@ -145,6 +146,23 @@ export function CreateStoryPage() {
             setHeroes(prev => {
                 if (prev.find(h => h.id === heroId)) return prev;
                 return [...prev, { id: heroId, name, description: 'Generating your custom hero...' }];
+            });
+        },
+        onComicBuilderRequested: (heroName, concept, requestedBuildSessionId) => {
+            if (concept) {
+                setStoryConcept(concept);
+            }
+            if (requestedBuildSessionId) {
+                setBuilderSessionId(requestedBuildSessionId);
+            }
+            setCharacter(heroName);
+            setPendingNavigation(prev => prev ? {
+                ...prev,
+                heroName,
+                greetingStarted: prev.greetingStarted || isThinking,
+            } : {
+                heroName,
+                greetingStarted: isThinking,
             });
         },
         onReconnected: () => {
@@ -263,10 +281,11 @@ Please continue from the ${gamePhase} phase.`);
         if (!isThinking && pendingNavigation.greetingStarted) {
             // Greeting audio has finished — clean up and navigate
             disconnect();
-            const sessionId = Math.random().toString(36).substring(7);
+            const sessionId = builderSessionId || currentSessionId || Math.random().toString(36).substring(7);
             navigate(`/build/${sessionId}`, {
                 state: {
                     topic,
+                    storyConcept,
                     heroName: pendingNavigation.heroName,
                     artStyle: 'comic',
                     ageRange: 2,
@@ -275,7 +294,7 @@ Please continue from the ${gamePhase} phase.`);
             });
             setPendingNavigation(null);
         }
-    }, [isThinking, pendingNavigation, disconnect, navigate, topic]);
+    }, [builderSessionId, currentSessionId, disconnect, isThinking, navigate, pendingNavigation, storyConcept, topic]);
 
     // Safety timeout: if greeting never starts within 4s, navigate anyway
     useEffect(() => {
@@ -284,10 +303,11 @@ Please continue from the ${gamePhase} phase.`);
             if (pendingNavigation) {
                 console.warn('[CreateStory] Safety timeout — navigating without greeting finish');
                 disconnect();
-                const sessionId = Math.random().toString(36).substring(7);
+                const sessionId = builderSessionId || currentSessionId || Math.random().toString(36).substring(7);
                 navigate(`/build/${sessionId}`, {
                     state: {
                         topic,
+                        storyConcept,
                         heroName: pendingNavigation.heroName,
                         artStyle: 'comic',
                         ageRange: 2,
@@ -298,7 +318,7 @@ Please continue from the ${gamePhase} phase.`);
             }
         }, 6000);
         return () => clearTimeout(timer);
-    }, [pendingNavigation, disconnect, navigate, topic]);
+    }, [builderSessionId, currentSessionId, disconnect, navigate, pendingNavigation, storyConcept, topic]);
 
     return (
         <div className="flex-1 w-full h-screen relative overflow-hidden bg-slate-900 flex justify-center items-center">

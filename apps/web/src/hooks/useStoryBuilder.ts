@@ -30,12 +30,40 @@ export interface ActiveQuiz {
     pointValue: number;
 }
 
+export type StoryHeadstartStatus = 'pending' | 'generating' | 'ready' | 'failed';
+
+export interface StoryHeadstartPanel {
+    panelId: string;
+    storyRole: string;
+    narration: string;
+    speechBubble?: string;
+    visualDescription: string;
+    learningObjective?: string;
+    explanationFocus: string;
+    childQuestion: string;
+    questionPurpose?: string;
+    integrationHint?: string;
+}
+
+export interface StoryHeadstart {
+    title: string;
+    storyGoal: string;
+    openingHook: string;
+    panelCount: number;
+    panels: StoryHeadstartPanel[];
+    closingNarration: string;
+    liveCustomizationBrief: string;
+}
+
 export interface StorySessionContext {
     topic: string;
+    storyConcept?: string;
     heroName: string;
     artStyle: string;
     ageRange: number;
     quizFrequency: string;
+    storyHeadstartStatus?: StoryHeadstartStatus;
+    storyHeadstart?: StoryHeadstart | null;
 }
 
 interface StoryBuilderRuntimeState {
@@ -140,21 +168,86 @@ function normalizeGuideTextForUi(text: string): string {
     return cleaned;
 }
 
+function getRemainingHeadstartPanels(
+    ctx: StorySessionContext,
+    runtimeState?: StoryBuilderRuntimeState
+): StoryHeadstartPanel[] {
+    const headstart = ctx.storyHeadstart;
+    if (!headstart?.panels?.length) {
+        return [];
+    }
+
+    if (!runtimeState) {
+        return headstart.panels;
+    }
+
+    const usedIds = new Set(runtimeState.panels.map(panel => panel.id));
+    if (runtimeState.stagedPanel) {
+        usedIds.add(runtimeState.stagedPanel.id);
+    }
+
+    return headstart.panels.filter(panel => !usedIds.has(panel.panelId));
+}
+
+function buildHeadstartPromptBlock(
+    ctx: StorySessionContext,
+    runtimeState?: StoryBuilderRuntimeState
+): string {
+    const headstart = ctx.storyHeadstart;
+    if (!headstart?.panels?.length) {
+        return '';
+    }
+
+    const remainingPanels = getRemainingHeadstartPanels(ctx, runtimeState);
+    const nextPreparedPanel = remainingPanels[0];
+    return `
+[PRIVATE RUNTIME GUIDANCE - NEVER READ THIS BLOCK ALOUD]
+Prepared story headstart title: ${headstart.title}
+Prepared story goal: ${headstart.storyGoal}
+Prepared opening hook: ${headstart.openingHook}
+Prepared panel count: ${headstart.panelCount}
+Prepared panels still to use: ${remainingPanels.length}
+Remaining prepared panel IDs in order: ${remainingPanels.map((panel) => panel.panelId).join(', ') || 'none'}
+
+Rules for the prepared headstart:
+- While any prepared panels remain, reveal them with present_prebuilt_panel in order.
+- Do not skip, replace, or rewrite the prepared panels.
+- The backend will send the visible panel narration and hidden teaching/question guidance after each reveal.
+- Speak only natural story narration, explanation, and dialogue for the child.
+- Never read panel IDs, JSON-style fields, labels, or runtime instructions aloud.
+- For each panel, ask at most one concept-grounded question, and make it a scene-shaping question when possible so the child's answer can influence the next panel.
+- A panel may end with either:
+  1. one scene-shaping question and then waiting for the reply, or
+  2. one short narration beat that invites a brief acknowledgement.
+- Do not move to the next panel until the current panel interaction has been completed.
+- If the child gives a strong answer, appreciate it specifically and weave it into the next transition.
+- After the prepared panels are exhausted, continue with live customization using add_comic_panel.
+- Customization brief after the prepared sequence: ${headstart.liveCustomizationBrief}
+${nextPreparedPanel ? `The very next prepared panel you must reveal is ${nextPreparedPanel.panelId}.` : 'There is no prepared panel remaining.'}
+`;
+}
+
 function buildInitialPrompt(ctx: StorySessionContext): string {
     const ageLabel = AGE_LABELS[ctx.ageRange] ?? 'Elementary (ages 8-10)';
+    const remainingPanels = getRemainingHeadstartPanels(ctx);
+    const firstPreparedPanel = remainingPanels[0];
+    const openingTool = firstPreparedPanel ? `present_prebuilt_panel for ${firstPreparedPanel.panelId}` : 'add_comic_panel for panel_1';
     return `Let's build our comic story!
 Topic: ${ctx.topic}
+Story Concept: ${ctx.storyConcept ?? ''}
 Hero: ${ctx.heroName}
 Art Style: ${ctx.artStyle}
 Audience Age: ${ageLabel}
 Quiz Frequency: ${ctx.quizFrequency}
+${buildHeadstartPromptBlock(ctx)}
 
 Rules for your very first turn:
 - Speak directly to the child in 1-2 short spoken sentences.
+- Your spoken output must contain only child-facing narration or dialogue, never runtime guidance.
 - Do not explain your plan.
 - Do not mention panels, structure, or what you are about to do.
 - Do not use markdown or headings.
-- Immediately call add_comic_panel for panel_1.
+- Immediately call ${openingTool}.
 
 While the first scene is being illustrated, keep the child engaged with the mission and hero.
 Continue the story only after each panel becomes visible.`;
@@ -162,17 +255,23 @@ Continue the story only after each panel becomes visible.`;
 
 function buildRecoveryOpeningPrompt(ctx: StorySessionContext): string {
     const ageLabel = AGE_LABELS[ctx.ageRange] ?? 'Elementary (ages 8-10)';
+    const remainingPanels = getRemainingHeadstartPanels(ctx);
+    const firstPreparedPanel = remainingPanels[0];
+    const openingTool = firstPreparedPanel ? `present_prebuilt_panel for ${firstPreparedPanel.panelId}` : 'add_comic_panel for panel_1';
     return `Story settings:
 Topic: ${ctx.topic}
+Story Concept: ${ctx.storyConcept ?? ''}
 Hero: ${ctx.heroName}
 Art Style: ${ctx.artStyle}
 Audience Age: ${ageLabel}
+${buildHeadstartPromptBlock(ctx)}
 
 In your next response:
 1. Speak directly to the child in exactly 1 or 2 short sentences.
-2. Immediately call add_comic_panel for panel_1.
-3. Do not use markdown, headings, or planning language.
-4. Do not talk about panels or story structure.`;
+2. Say only child-facing narration or dialogue, never runtime guidance.
+3. Immediately call ${openingTool}.
+4. Do not use markdown, headings, or planning language.
+5. Do not talk about panels or story structure.`;
 }
 
 function buildResumePrompt(ctx: StorySessionContext, runtimeState: StoryBuilderRuntimeState): string {
@@ -191,17 +290,20 @@ function buildResumePrompt(ctx: StorySessionContext, runtimeState: StoryBuilderR
 
     return `[CONTEXT RESUME] We are in the middle of building a comic story together.
 Topic: ${ctx.topic}
+Story Concept: ${ctx.storyConcept ?? ''}
 Hero: ${ctx.heroName}
 Art Style: ${ctx.artStyle}
 Audience Age: ${ageLabel}
 Quiz Frequency: ${ctx.quizFrequency}
+${buildHeadstartPromptBlock(ctx, runtimeState)}
 Current phase: ${runtimeState.builderPhase}
 Visible panels so far: ${runtimeState.panels.length}
 ${panelSummary || 'No visible panels yet.'}
 ${stagedSummary}
 ${quizSummary}
 Current score: ${runtimeState.score}
-Resume from the exact current state. If a scene was still being prepared, recreate it smoothly.`;
+Resume from the exact current state. If a scene was still being prepared, recreate it smoothly.
+Speak only child-facing narration or dialogue, never runtime guidance.`;
 }
 
 function storyBuilderReducer(

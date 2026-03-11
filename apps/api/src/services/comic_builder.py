@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 
 from src.services.image_gen import generate_image
+from src.services.story_session_store import load_story_session
 
 COMIC_BUILDER_SYSTEM_INSTRUCTION = """
 You are a magical Story Guide for Questory — a learning adventure app where kids discover real knowledge through epic comic book stories!
@@ -29,7 +30,12 @@ THE STORY-TEACHING CYCLE (repeat 2-3x per story)
 
 PANEL A — STORY BEAT (no learning_objective needed):
   Set the scene. Introduce a challenge, mystery, or danger.
-  End your spoken narration with a curiosity hook question to the child:
+  End your spoken narration with a curiosity hook question to the child.
+  That question MUST connect to either:
+    - the concept the story just taught, or
+    - the next concept the story is clearly about to reveal.
+  Never ask a random filler question that does not move the story or learning forward.
+  Example shapes:
   "Hmm, I wonder... do you know why [phenomenon] happens?"
   or "What do YOU think [hero name] should do right now?"
   Wait a moment for their response — then incorporate it!
@@ -39,7 +45,10 @@ PANEL B — TEACHING BEAT (include learning_objective):
   GOOD: "The volcano explodes with lava! That's because deep underground, liquid rock called
          magma pushes up through cracks where Earth's giant tectonic plates collide!"
   BAD:  "A volcano erupted. Volcanoes are mountains that erupt."
-  After narrating, ask the child something creative: "Wow! If YOU could control a volcano, what would you do with it?"
+  After narrating, ask one question that deepens the fact you just taught or points toward the next related discovery.
+  Whenever possible, the question should help shape the next scene based on the child's answer.
+  GOOD: "Wow! Now that we know magma pushes up through cracks, where do you think our hero should look next?"
+  BAD: "What is your favorite color?"
 
 PANEL C — DEEPER TEACHING BEAT (optional, include learning_objective):
   Build on the fact from Panel B — show a consequence, application, or related wonder.
@@ -62,14 +71,26 @@ REACTION — CELEBRATE AND CONTINUE:
 ═══════════════════════════════════════
 CHILD ENGAGEMENT RULES
 ═══════════════════════════════════════
-After EVERY teaching panel, ask the child ONE of these before your next panel:
-  - "What do you think [hero name] should do next?"
-  - "Have you ever seen or heard about [educational concept] before?"
-  - "If YOU were [hero name] right now, what would you do?"
-  - "What do you think is going to happen next?"
-  - "That's amazing, right?! What's the most surprising thing so far?"
+After EVERY teaching panel, ask the child ONE question before your next panel.
+That question must be tied to:
+  - the educational concept the child just saw in the story, or
+  - the next concept or reveal the story is obviously setting up.
+Never ask a disconnected question that leads nowhere.
+Whenever possible, make the question shape the next scene, action, or discovery.
 
-When the child responds — use their idea! Say "Oh I love that idea!" then incorporate it into the next panel narration or story direction. This is THEIR story.
+Good question shapes:
+  - "What do you think [hero name] should do next now that we know [concept]?"
+  - "Have you ever seen or heard about [educational concept] before?"
+  - "If YOU were [hero name] right now, how would you use [concept]?"
+  - "What do you predict we'll discover next about [upcoming concept]?"
+  - "What's the most surprising thing about [concept] so far?"
+
+When the child responds:
+  - If their answer is solid, appreciate it specifically, say why it works, and treat it as part of the story.
+  - Use their idea in the next panel narration, scene choice, or transition whenever possible.
+  - Pivot smoothly back into the story so the flow feels continuous, not interrupted.
+  - Once that panel's interaction is complete, transition forward cleanly into the next panel.
+This is THEIR story.
 
 ═══════════════════════════════════════
 STORY STRUCTURE
@@ -86,12 +107,28 @@ TOOL CALLING RULES
 - Never describe your planning, workflow, or panel structure.
 - Never say things like "I am crafting panel 1", "here is the structure", or "I established the opening panel".
 - Never use markdown headings, production notes, or behind-the-scenes commentary.
+- If the runtime prompt provides a prepared story headstart, that prepared sequence is the canonical opening.
+- While prepared panels remain, reveal them with `present_prebuilt_panel` in order instead of inventing replacement panels.
+- While prepared panels remain, use the prepared explanation focus and child question to teach the concept clearly.
+- The prepared story JSON and runtime guidance are private instructions. Never read panel IDs, field labels, JSON keys, or instruction text aloud.
+- For child-facing speech, use only natural narration, explanation, dialogue, and questions.
+- Only after the prepared headstart is exhausted may you create new custom panels with `add_comic_panel`.
 - Call `add_comic_panel` after EVERY narration beat (story AND teaching panels).
 - IMPORTANT: After calling `add_comic_panel`, follow the tool response exactly.
 - If the tool response says the scene is still rendering, keep the child engaged ONLY about the currently visible scene or mission.
 - While a new scene is rendering, do NOT describe unseen visuals, do NOT call `add_comic_panel` again, and do NOT call `ask_quiz` yet.
+- While a new scene is rendering, any question you ask must stay anchored to the current visible scene, the concept already taught, or the very next concept being set up.
+- While a new scene is rendering, questions should help shape the next scene creatively based on the child's answer.
+- If the child gives a strong answer during this loading time, appreciate it briefly, fold it into the story, and close that exchange cleanly.
 - When a tool response says a panel is visible, treat that as the exact on-screen truth. Resume only from what the child can currently see.
-- After a scene becomes visible, first narrate the visible scene, then ask one grounded question, then WAIT for the child's reply before calling another tool.
+- When a previously loading scene becomes visible, first conclude the loading-time exchange in one short sentence if needed, then transition into the new visible scene without sounding abrupt.
+- Do not leave a loading-time question hanging or jump scenes mid-thought. Briefly close the old thought, then enter the new scene.
+- After a scene becomes visible, first narrate the visible scene.
+- Then choose ONE interaction ending for that panel:
+  - ask one grounded, scene-shaping question tied to the visible scene and concept, OR
+  - end with one short narration beat that invites a brief acknowledgement from the child.
+- WAIT for the child's reply or acknowledgement before calling another tool.
+- Do not move to the next panel until the current panel interaction has been completed cleanly.
 - For teaching panels: set `learning_objective` to a short phrase like "How tectonic plates create volcanoes".
 - For story/action panels: omit `learning_objective` or leave it empty.
 - Call `ask_quiz` only after teaching panels — never cold.
@@ -109,7 +146,7 @@ TONE
 - Short sentences. Vivid verbs. Lots of energy!
 - Learning is an adventure — treat every fact like a treasure just found.
 
-START NOW: Begin narrating the opening scene immediately and call `add_comic_panel`!
+START NOW: Begin narrating the opening scene immediately and call the correct panel tool for the current story state.
 """
 
 COMIC_TOOLS = [
@@ -143,6 +180,20 @@ COMIC_TOOLS = [
                         }
                     },
                     "required": ["panel_id", "narration", "visual_description"]
+                }
+            },
+            {
+                "name": "present_prebuilt_panel",
+                "description": "Reveal the next prepared panel from the pre-generated headstart story. Use this before creating custom panels when a prepared story sequence exists.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "panel_id": {
+                            "type": "STRING",
+                            "description": "The prepared panel ID to reveal next, such as 'panel_1'."
+                        }
+                    },
+                    "required": ["panel_id"]
                 }
             },
             {
@@ -201,6 +252,52 @@ COMIC_TOOLS = [
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-12-2025"
 MAX_OPENING_RECOVERY_ATTEMPTS = 2
 
+
+def _coerce_str(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _load_prebuilt_panels(session_id: str) -> list[dict[str, Any]]:
+    story_session = load_story_session(session_id) or {}
+    story_headstart = story_session.get("storyHeadstart")
+    if not isinstance(story_headstart, dict):
+        return []
+
+    panels = story_headstart.get("panels")
+    if not isinstance(panels, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, raw_panel in enumerate(panels, start=1):
+        if not isinstance(raw_panel, dict):
+            continue
+
+        narration = _coerce_str(raw_panel.get("narration"))
+        visual_description = _coerce_str(raw_panel.get("visual_description"))
+        if not narration or not visual_description:
+            continue
+
+        normalized.append({
+            "panel_id": _coerce_str(raw_panel.get("panel_id")) or f"panel_{index}",
+            "panel_index": index - 1,
+            "story_role": _coerce_str(raw_panel.get("story_role")) or "story",
+            "narration": narration,
+            "speech_bubble": _coerce_str(raw_panel.get("speech_bubble")) or None,
+            "visual_description": visual_description,
+            "learning_objective": _coerce_str(raw_panel.get("learning_objective")) or None,
+            "explanation_focus": _coerce_str(raw_panel.get("explanation_focus")) or narration,
+            "child_question": _coerce_str(raw_panel.get("child_question")) or "What do you think happens next?",
+            "question_purpose": _coerce_str(raw_panel.get("question_purpose")),
+            "integration_hint": _coerce_str(raw_panel.get("integration_hint")),
+            "source": "prebuilt",
+        })
+
+    return normalized
+
 async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
     """
     Proxies a WebSocket connection for the Comic Book Story Builder mode.
@@ -214,6 +311,7 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
     pending_quiz_contexts: dict[str, dict[str, Any]] = {}
     last_panel_image_b64: str | None = None
     visible_panels: list[dict[str, Any]] = []
+    prebuilt_panels = _load_prebuilt_panels(session_id)
 
     async def close_client_connection(code: int, reason: str):
         client_disconnected.set()
@@ -246,6 +344,11 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
             for panel in visible_panels[-3:]
         ]
         last_panel = visible_panels[-1] if visible_panels else None
+        visible_panel_ids = {panel["panel_id"] for panel in visible_panels}
+        next_prebuilt_panel = next(
+            (panel for panel in prebuilt_panels if panel["panel_id"] not in visible_panel_ids),
+            None,
+        )
         return {
             "visiblePanelCount": len(visible_panels),
             "lastVisiblePanelId": last_panel["panel_id"] if last_panel else None,
@@ -253,9 +356,176 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
             "lastLearningObjective": last_panel.get("learning_objective") if last_panel else None,
             "recentPanels": recent_panels,
             "pendingPanel": pending_panel,
+            "prebuiltPanelCount": len(prebuilt_panels),
+            "remainingPrebuiltPanels": len([panel for panel in prebuilt_panels if panel["panel_id"] not in visible_panel_ids]),
+            "nextPrebuiltPanel": {
+                "panelId": next_prebuilt_panel["panel_id"],
+                "narration": next_prebuilt_panel["narration"],
+                "learningObjective": next_prebuilt_panel.get("learning_objective"),
+            } if next_prebuilt_panel else None,
             "activeQuiz": quiz,
             "nextStep": next_step,
         }
+
+    def get_next_prebuilt_panel() -> dict[str, Any] | None:
+        visible_panel_ids = {panel["panel_id"] for panel in visible_panels}
+        visible_panel_ids.update(pending_scene_contexts.keys())
+        return next(
+            (panel for panel in prebuilt_panels if panel["panel_id"] not in visible_panel_ids),
+            None,
+        )
+
+    async def stage_panel(
+        *,
+        tool_name: str,
+        function_call_id: str,
+        panel_payload: dict[str, Any],
+    ) -> None:
+        nonlocal last_panel_image_b64
+
+        if pending_scene_contexts:
+            wait_step = (
+                "A new scene is already rendering and is not visible yet. "
+                "Do not create another scene. Keep the child engaged with the current visible scene only "
+                "and wait for the later system update."
+            )
+            await gemini_session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        name=tool_name,
+                        id=function_call_id,
+                        response={
+                            "result": wait_step,
+                            "runtimeContext": build_runtime_context(
+                                next_step=wait_step,
+                            ),
+                        }
+                    )
+                ]
+            )
+            return
+
+        panel_id = panel_payload.get("panel_id", "panel_unknown")
+        narration = panel_payload.get("narration", "")
+        speech_bubble = panel_payload.get("speech_bubble")
+        visual_description = panel_payload.get("visual_description", "")
+        learning_objective = panel_payload.get("learning_objective") or None
+        explanation_focus = panel_payload.get("explanation_focus")
+        child_question = panel_payload.get("child_question")
+        integration_hint = panel_payload.get("integration_hint")
+        panel_source = panel_payload.get("source", "live")
+        panel_index = len(visible_panels)
+
+        panel_context = {
+            "panelId": panel_id,
+            "panelIndex": panel_index,
+            "narration": narration,
+            "learningObjective": learning_objective,
+            "visualDescription": visual_description,
+            "speechBubble": speech_bubble,
+            "source": panel_source,
+        }
+
+        pending_scene_contexts[panel_id] = {
+            "panel_id": panel_id,
+            "panel_index": panel_index,
+            "narration": narration,
+            "speech_bubble": speech_bubble,
+            "learning_objective": learning_objective,
+            "visual_description": visual_description,
+            "image_url": None,
+            "image_status": "loading",
+            "explanation_focus": explanation_focus,
+            "child_question": child_question,
+            "integration_hint": integration_hint,
+            "source": panel_source,
+        }
+
+        await safe_send({
+            "backendEvent": {
+                "type": "scene_stage_started",
+                "panelId": panel_id,
+                "panelIndex": panel_index,
+                "narration": narration,
+                "speechBubble": speech_bubble,
+                "learningObjective": learning_objective,
+                "isFirstScene": panel_index == 0,
+            }
+        })
+
+        reference_image = last_panel_image_b64
+        if visible_panels:
+            current_visible_panel = visible_panels[-1]
+            bridge_step = (
+                f"A new scene ({panel_id}) is rendering in the background. "
+                f"The child still sees panel {current_visible_panel['panel_id']}: {current_visible_panel['narration']} "
+                "Keep the child engaged with the CURRENT visible scene only. "
+                "Acknowledge their last idea if relevant, or share one short interesting fact grounded in this current scene, "
+                "and you may ask one brief grounded follow-up question that can shape the next scene. "
+                "If you ask a question, close that exchange cleanly before switching scenes later. "
+                "Do not describe the unseen new scene. Do not call add_comic_panel again. Do not call ask_quiz yet. "
+                "Wait for a later system update telling you the new scene is visible."
+            )
+        else:
+            bridge_step = (
+                f"The opening scene ({panel_id}) is rendering. "
+                "Keep the child engaged with the hero, mission, and immediate stakes in 1-2 short spoken sentences. "
+                "If you ask a question, make it help shape what should happen next. "
+                "Do not describe unseen visuals. Do not call add_comic_panel again. Do not call ask_quiz yet. "
+                "Wait for a later system update telling you the first scene is visible."
+            )
+
+        await gemini_session.send_tool_response(
+            function_responses=[
+                types.FunctionResponse(
+                    name=tool_name,
+                    id=function_call_id,
+                    response={
+                        "result": bridge_step,
+                        "runtimeContext": build_runtime_context(
+                            next_step=bridge_step,
+                            pending_panel=panel_context,
+                        ),
+                    }
+                )
+            ]
+        )
+
+        async def build_panel_in_background() -> None:
+            image_url: str | None = None
+            image_status = "error"
+
+            try:
+                print(f"[{session_id}] [Builder] Generating image for {panel_id} (ref={'yes' if reference_image else 'no'})")
+                image_url = await generate_image(
+                    visual_description,
+                    reference_image_b64=reference_image,
+                )
+                image_status = "ready" if image_url else "error"
+            except Exception as image_error:
+                print(f"[{session_id}] [Builder] Image gen error for {panel_id}: {image_error}")
+
+            pending_scene = pending_scene_contexts.get(panel_id)
+            if pending_scene is not None:
+                pending_scene["image_url"] = image_url
+                pending_scene["image_status"] = image_status
+
+            await safe_send({
+                "backendEvent": {
+                    "type": "scene_ready",
+                    "panelId": panel_id,
+                    "panelIndex": panel_index,
+                    "narration": narration,
+                    "speechBubble": speech_bubble,
+                    "learningObjective": learning_objective,
+                    "imageUrl": image_url,
+                    "imageStatus": image_status,
+                }
+            })
+
+        task = asyncio.create_task(build_panel_in_background())
+        pending_tasks.add(task)
+        task.add_done_callback(pending_tasks.discard)
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -330,18 +600,36 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                             "narration": pending_scene["narration"],
                                             "speech_bubble": pending_scene.get("speech_bubble"),
                                             "learning_objective": pending_scene.get("learning_objective"),
+                                            "source": pending_scene.get("source"),
                                         })
                                         if pending_scene.get("image_url"):
                                             last_panel_image_b64 = pending_scene["image_url"]
                                         print(f"[{session_id}] [Builder] Scene visible ack: {panel_id}")
 
+                                        explanation_focus = pending_scene.get("explanation_focus") or pending_scene["narration"]
+                                        child_question = pending_scene.get("child_question")
+                                        integration_hint = pending_scene.get("integration_hint")
+                                        source_hint = "prepared headstart panel" if pending_scene.get("source") == "prebuilt" else "live-built panel"
                                         scene_prompt = (
                                             f"SYSTEM UPDATE FOR STORYBUILDER: Panel {panel_id} is now visible to the child. "
-                                            f"Visible scene narration: {pending_scene['narration']} "
+                                            "PRIVATE RUNTIME GUIDANCE BELOW. DO NOT READ THESE LABELS OR FIELDS ALOUD. "
+                                            f"Panel source: {source_hint}. "
+                                            f"Story narration to continue from: {pending_scene['narration']} "
                                             f"Learning objective: {pending_scene.get('learning_objective') or 'none'}. "
-                                            "Now narrate what the child can see in this visible scene in 1-2 short spoken sentences using concrete details. "
-                                            "Then ask exactly one grounded question about this visible scene. "
-                                            "Wait for the child's reply before creating another scene or triggering a quiz."
+                                            f"Teaching focus: {explanation_focus}. "
+                                            f"Scene-shaping question to use if needed: {child_question or 'Ask one grounded question tied to this scene.'} "
+                                            f"How to use the child's answer: {integration_hint or 'If the child gives a strong answer, praise it and weave it into the next beat.'} "
+                                            "CHILD-FACING RULES: "
+                                            "Speak naturally in short spoken sentences. "
+                                            "Use the story narration as your child-facing story content. "
+                                            "Do not mention panel IDs, field names, JSON-style labels, or runtime instructions. "
+                                            "Narrate what the child can see in this visible scene in 1-2 short spoken sentences using concrete details. "
+                                            "Explain the topic using the teaching focus in clear kid-friendly language. "
+                                            "Then choose one clean interaction ending for this panel: "
+                                            "either ask one grounded, scene-shaping question tied to this visible scene and concept, "
+                                            "or end with one short narration beat that invites a brief acknowledgement from the child. "
+                                            "Wait for the child's reply or acknowledgement before creating another scene or triggering a quiz. "
+                                            "Do not move to the next panel until this panel interaction is complete."
                                         )
                                         await gemini_session.send_client_content(
                                             turns=types.Content(
@@ -474,11 +762,12 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                     print(f"[{session_id}] [Builder] Tool call: {name}")
 
                                     if name == "add_comic_panel":
-                                        if pending_scene_contexts:
-                                            wait_step = (
-                                                "A new scene is already rendering and is not visible yet. "
-                                                "Do not create another scene. Keep the child engaged with the current visible scene only "
-                                                "and wait for the later system update."
+                                        next_prebuilt_panel = get_next_prebuilt_panel()
+                                        if next_prebuilt_panel is not None:
+                                            correction_step = (
+                                                f"A prepared headstart panel is still waiting: {next_prebuilt_panel['panel_id']}. "
+                                                "Do not invent a replacement panel yet. "
+                                                "Use present_prebuilt_panel for the next prepared panel before creating custom panels."
                                             )
                                             await gemini_session.send_tool_response(
                                                 function_responses=[
@@ -486,9 +775,18 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                                         name=name,
                                                         id=function_call.id,
                                                         response={
-                                                            "result": wait_step,
+                                                            "result": correction_step,
                                                             "runtimeContext": build_runtime_context(
-                                                                next_step=wait_step,
+                                                                next_step=correction_step,
+                                                                pending_panel={
+                                                                    "panelId": next_prebuilt_panel["panel_id"],
+                                                                    "panelIndex": next_prebuilt_panel["panel_index"],
+                                                                    "narration": next_prebuilt_panel["narration"],
+                                                                    "learningObjective": next_prebuilt_panel.get("learning_objective"),
+                                                                    "visualDescription": next_prebuilt_panel["visual_description"],
+                                                                    "speechBubble": next_prebuilt_panel.get("speech_bubble"),
+                                                                    "source": "prebuilt",
+                                                                },
                                                             ),
                                                         }
                                                     )
@@ -496,127 +794,78 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                             )
                                             continue
 
-                                        panel_id = args.get("panel_id", "panel_unknown")
-                                        narration = args.get("narration", "")
-                                        speech_bubble = args.get("speech_bubble")
-                                        visual_description = args.get("visual_description", "")
-                                        learning_objective = args.get("learning_objective") or None
-                                        panel_index = len(visible_panels)
-
-                                        panel_context = {
-                                            "panelId": panel_id,
-                                            "panelIndex": panel_index,
-                                            "narration": narration,
-                                            "learningObjective": learning_objective,
-                                            "visualDescription": visual_description,
-                                            "speechBubble": speech_bubble,
-                                        }
-
-                                        pending_scene_contexts[panel_id] = {
-                                            "panel_id": panel_id,
-                                            "panel_index": panel_index,
-                                            "narration": narration,
-                                            "speech_bubble": speech_bubble,
-                                            "learning_objective": learning_objective,
-                                            "visual_description": visual_description,
-                                            "image_url": None,
-                                            "image_status": "loading",
-                                        }
-
-                                        await safe_send({
-                                            "backendEvent": {
-                                                "type": "scene_stage_started",
-                                                "panelId": panel_id,
-                                                "panelIndex": panel_index,
-                                                "narration": narration,
-                                                "speechBubble": speech_bubble,
-                                                "learningObjective": learning_objective,
-                                                "isFirstScene": panel_index == 0,
-                                            }
-                                        })
-
-                                        reference_image = last_panel_image_b64
-                                        function_call_id = function_call.id
-
-                                        if visible_panels:
-                                            current_visible_panel = visible_panels[-1]
-                                            bridge_step = (
-                                                f"A new scene ({panel_id}) is rendering in the background. "
-                                                f"The child still sees panel {current_visible_panel['panel_id']}: {current_visible_panel['narration']} "
-                                                "Keep the child engaged with the CURRENT visible scene only. "
-                                                "Acknowledge their last idea if relevant, or share one short interesting fact grounded in this current scene, "
-                                                "and you may ask one brief grounded follow-up question. "
-                                                "Do not describe the unseen new scene. Do not call add_comic_panel again. Do not call ask_quiz yet. "
-                                                "Wait for a later system update telling you the new scene is visible."
-                                            )
-                                        else:
-                                            bridge_step = (
-                                                f"The opening scene ({panel_id}) is rendering. "
-                                                "Keep the child engaged with the hero, mission, and immediate stakes in 1-2 short spoken sentences. "
-                                                "Do not describe unseen visuals. Do not call add_comic_panel again. Do not call ask_quiz yet. "
-                                                "Wait for a later system update telling you the first scene is visible."
-                                            )
-
-                                        await gemini_session.send_tool_response(
-                                            function_responses=[
-                                                types.FunctionResponse(
-                                                    name=name,
-                                                    id=function_call_id,
-                                                    response={
-                                                        "result": bridge_step,
-                                                        "runtimeContext": build_runtime_context(
-                                                            next_step=bridge_step,
-                                                            pending_panel=panel_context,
-                                                        ),
-                                                    }
-                                                )
-                                            ]
+                                        await stage_panel(
+                                            tool_name=name,
+                                            function_call_id=function_call.id,
+                                            panel_payload={
+                                                "panel_id": args.get("panel_id", "panel_unknown"),
+                                                "narration": args.get("narration", ""),
+                                                "speech_bubble": args.get("speech_bubble"),
+                                                "visual_description": args.get("visual_description", ""),
+                                                "learning_objective": args.get("learning_objective") or None,
+                                                "source": "live",
+                                            },
                                         )
 
-                                        async def build_panel_in_background(
-                                            *,
-                                            pid: str = panel_id,
-                                            pindex: int = panel_index,
-                                            narration_text: str = narration,
-                                            speech: str | None = speech_bubble,
-                                            learning: str | None = learning_objective,
-                                            visual_desc: str = visual_description,
-                                            ref_image: str | None = reference_image,
-                                        ):
-                                            image_url: str | None = None
-                                            image_status = "error"
+                                    elif name == "present_prebuilt_panel":
+                                        next_prebuilt_panel = get_next_prebuilt_panel()
+                                        if next_prebuilt_panel is None:
+                                            fallback_step = (
+                                                "There are no prepared headstart panels left. "
+                                                "Continue with live customization and create new panels with add_comic_panel."
+                                            )
+                                            await gemini_session.send_tool_response(
+                                                function_responses=[
+                                                    types.FunctionResponse(
+                                                        name=name,
+                                                        id=function_call.id,
+                                                        response={
+                                                            "result": fallback_step,
+                                                            "runtimeContext": build_runtime_context(
+                                                                next_step=fallback_step,
+                                                            ),
+                                                        }
+                                                    )
+                                                ]
+                                            )
+                                            continue
 
-                                            try:
-                                                print(f"[{session_id}] [Builder] Generating image for {pid} (ref={'yes' if ref_image else 'no'})")
-                                                image_url = await generate_image(
-                                                    visual_desc,
-                                                    reference_image_b64=ref_image,
-                                                )
-                                                image_status = "ready" if image_url else "error"
-                                            except Exception as image_error:
-                                                print(f"[{session_id}] [Builder] Image gen error for {pid}: {image_error}")
+                                        requested_panel_id = args.get("panel_id")
+                                        if requested_panel_id and requested_panel_id != next_prebuilt_panel["panel_id"]:
+                                            correction_step = (
+                                                f"The next prepared panel is {next_prebuilt_panel['panel_id']}, not {requested_panel_id}. "
+                                                "Reveal the prepared headstart panels in order."
+                                            )
+                                            await gemini_session.send_tool_response(
+                                                function_responses=[
+                                                    types.FunctionResponse(
+                                                        name=name,
+                                                        id=function_call.id,
+                                                        response={
+                                                            "result": correction_step,
+                                                            "runtimeContext": build_runtime_context(
+                                                                next_step=correction_step,
+                                                                pending_panel={
+                                                                    "panelId": next_prebuilt_panel["panel_id"],
+                                                                    "panelIndex": next_prebuilt_panel["panel_index"],
+                                                                    "narration": next_prebuilt_panel["narration"],
+                                                                    "learningObjective": next_prebuilt_panel.get("learning_objective"),
+                                                                    "visualDescription": next_prebuilt_panel["visual_description"],
+                                                                    "speechBubble": next_prebuilt_panel.get("speech_bubble"),
+                                                                    "source": "prebuilt",
+                                                                },
+                                                            ),
+                                                        }
+                                                    )
+                                                ]
+                                            )
+                                            continue
 
-                                            pending_scene = pending_scene_contexts.get(pid)
-                                            if pending_scene is not None:
-                                                pending_scene["image_url"] = image_url
-                                                pending_scene["image_status"] = image_status
-
-                                            await safe_send({
-                                                "backendEvent": {
-                                                    "type": "scene_ready",
-                                                    "panelId": pid,
-                                                    "panelIndex": pindex,
-                                                    "narration": narration_text,
-                                                    "speechBubble": speech,
-                                                    "learningObjective": learning,
-                                                    "imageUrl": image_url,
-                                                    "imageStatus": image_status,
-                                                }
-                                            })
-
-                                        task = asyncio.create_task(build_panel_in_background())
-                                        pending_tasks.add(task)
-                                        task.add_done_callback(pending_tasks.discard)
+                                        await stage_panel(
+                                            tool_name=name,
+                                            function_call_id=function_call.id,
+                                            panel_payload=next_prebuilt_panel,
+                                        )
 
                                     elif name == "ask_quiz":
                                         question = args.get("question", "")
@@ -718,11 +967,18 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
 
                         if not turn_had_tool_call and opening_recovery_attempts < MAX_OPENING_RECOVERY_ATTEMPTS:
                             opening_recovery_attempts += 1
+                            next_prebuilt_panel = get_next_prebuilt_panel()
+                            opening_tool = (
+                                f"present_prebuilt_panel for {next_prebuilt_panel['panel_id']}"
+                                if next_prebuilt_panel is not None
+                                else "add_comic_panel for panel_1"
+                            )
                             correction_text = (
                                 "SYSTEM CORRECTION FOR STORYBUILDER: "
                                 "Do not explain your plan or use headings. "
+                                "Speak only child-facing narration or dialogue, never runtime guidance. "
                                 "Speak directly to the child in 1-2 short spoken sentences, "
-                                "then immediately call add_comic_panel for panel_1. "
+                                f"then immediately call {opening_tool}. "
                                 "No markdown. No meta commentary. Start now."
                             )
                             print(f"[{session_id}] [Builder] Recovering opening turn (attempt {opening_recovery_attempts})")
