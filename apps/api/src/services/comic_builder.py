@@ -1,7 +1,9 @@
-import json
-import base64
 import asyncio
+import base64
+import json
 import os
+from typing import Any
+
 from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
@@ -80,11 +82,23 @@ Total panels: 9-12. Structure per arc:
 ═══════════════════════════════════════
 TOOL CALLING RULES
 ═══════════════════════════════════════
+- Start by greeting the child in 1-2 short spoken sentences before creating the first panel.
+- Never describe your planning, workflow, or panel structure.
+- Never say things like "I am crafting panel 1", "here is the structure", or "I established the opening panel".
+- Never use markdown headings, production notes, or behind-the-scenes commentary.
 - Call `add_comic_panel` after EVERY narration beat (story AND teaching panels).
-- IMPORTANT: After calling `add_comic_panel`, WAIT silently for the tool confirmation before doing anything else. The image is being rendered — do not narrate or call another tool until you receive the response.
+- IMPORTANT: After calling `add_comic_panel`, follow the tool response exactly.
+- If the tool response says the scene is still rendering, keep the child engaged ONLY about the currently visible scene or mission.
+- While a new scene is rendering, do NOT describe unseen visuals, do NOT call `add_comic_panel` again, and do NOT call `ask_quiz` yet.
+- When a tool response says a panel is visible, treat that as the exact on-screen truth. Resume only from what the child can currently see.
+- After a scene becomes visible, first narrate the visible scene, then ask one grounded question, then WAIT for the child's reply before calling another tool.
 - For teaching panels: set `learning_objective` to a short phrase like "How tectonic plates create volcanoes".
 - For story/action panels: omit `learning_objective` or leave it empty.
 - Call `ask_quiz` only after teaching panels — never cold.
+- Only trigger a quiz after finishing the current scene interaction and clearly transitioning into quiz mode.
+- After calling `ask_quiz`, stop speaking and wait for the later system update with the child's answer.
+- Do not continue the story, narrate a new scene, or call any tool until that quiz-answer system update arrives.
+- After the quiz-answer system update arrives, react to the child's actual answer briefly, then continue the story.
 - Call `story_complete` when the story reaches a satisfying resolution.
 
 ═══════════════════════════════════════
@@ -185,7 +199,7 @@ COMIC_TOOLS = [
 ]
 
 MODEL_ID = "gemini-2.5-flash-native-audio-preview-12-2025"
-
+MAX_OPENING_RECOVERY_ATTEMPTS = 2
 
 async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
     """
@@ -196,16 +210,52 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
 
     client_disconnected = asyncio.Event()
     pending_tasks: set[asyncio.Task] = set()
-    last_panel_image_b64: str | None = None  # Track last image for continuity
+    pending_scene_contexts: dict[str, dict[str, Any]] = {}
+    pending_quiz_contexts: dict[str, dict[str, Any]] = {}
+    last_panel_image_b64: str | None = None
+    visible_panels: list[dict[str, Any]] = []
 
-    async def safe_send(payload: dict):
-        """Send JSON to the client WebSocket, but only if still connected."""
+    async def close_client_connection(code: int, reason: str):
+        client_disconnected.set()
+        try:
+            await client_ws.close(code=code, reason=reason)
+        except Exception:
+            pass
+
+    async def safe_send(payload: dict[str, Any]):
         if client_disconnected.is_set():
             return
         try:
             await client_ws.send_text(json.dumps(payload))
         except Exception:
             client_disconnected.set()
+
+    def build_runtime_context(
+        *,
+        next_step: str,
+        pending_panel: dict[str, Any] | None = None,
+        quiz: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        recent_panels = [
+            {
+                "panelId": panel["panel_id"],
+                "panelIndex": panel["panel_index"],
+                "narration": panel["narration"],
+                "learningObjective": panel.get("learning_objective"),
+            }
+            for panel in visible_panels[-3:]
+        ]
+        last_panel = visible_panels[-1] if visible_panels else None
+        return {
+            "visiblePanelCount": len(visible_panels),
+            "lastVisiblePanelId": last_panel["panel_id"] if last_panel else None,
+            "lastVisibleNarration": last_panel["narration"] if last_panel else None,
+            "lastLearningObjective": last_panel.get("learning_objective") if last_panel else None,
+            "recentPanels": recent_panels,
+            "pendingPanel": pending_panel,
+            "activeQuiz": quiz,
+            "nextStep": next_step,
+        }
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -228,6 +278,7 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
             print(f"[{session_id}] [Builder] Connected to Gemini Live ({MODEL_ID})")
 
             async def receive_from_client():
+                nonlocal last_panel_image_b64
                 audio_chunk_count = 0
                 try:
                     while True:
@@ -251,7 +302,7 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
 
                         elif "clientContent" in data:
                             for turn in data["clientContent"]["turns"]:
-                                text_parts = [p["text"] for p in turn["parts"] if "text" in p]
+                                text_parts = [part["text"] for part in turn["parts"] if "text" in part]
                                 if text_parts:
                                     text = " ".join(text_parts)
                                     content = types.Content(
@@ -264,16 +315,100 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                     )
                                     print(f"[{session_id}] [Builder] Text: {text[:80]}")
 
+                        elif "clientEvent" in data:
+                            client_event = data["clientEvent"]
+                            event_type = client_event.get("type")
+
+                            if event_type == "scene_visible_ack":
+                                panel_id = client_event.get("panelId")
+                                if isinstance(panel_id, str):
+                                    pending_scene = pending_scene_contexts.pop(panel_id, None)
+                                    if pending_scene:
+                                        visible_panels.append({
+                                            "panel_id": pending_scene["panel_id"],
+                                            "panel_index": pending_scene["panel_index"],
+                                            "narration": pending_scene["narration"],
+                                            "speech_bubble": pending_scene.get("speech_bubble"),
+                                            "learning_objective": pending_scene.get("learning_objective"),
+                                        })
+                                        if pending_scene.get("image_url"):
+                                            last_panel_image_b64 = pending_scene["image_url"]
+                                        print(f"[{session_id}] [Builder] Scene visible ack: {panel_id}")
+
+                                        scene_prompt = (
+                                            f"SYSTEM UPDATE FOR STORYBUILDER: Panel {panel_id} is now visible to the child. "
+                                            f"Visible scene narration: {pending_scene['narration']} "
+                                            f"Learning objective: {pending_scene.get('learning_objective') or 'none'}. "
+                                            "Now narrate what the child can see in this visible scene in 1-2 short spoken sentences using concrete details. "
+                                            "Then ask exactly one grounded question about this visible scene. "
+                                            "Wait for the child's reply before creating another scene or triggering a quiz."
+                                        )
+                                        await gemini_session.send_client_content(
+                                            turns=types.Content(
+                                                parts=[types.Part.from_text(text=scene_prompt)],
+                                                role="user",
+                                            ),
+                                            turn_complete=True,
+                                        )
+
+                            elif event_type == "quiz_answer_ack":
+                                quiz_id = client_event.get("quizId")
+                                if isinstance(quiz_id, str):
+                                    pending_quiz = pending_quiz_contexts.pop(quiz_id, None)
+                                    if pending_quiz:
+                                        print(f"[{session_id}] [Builder] Quiz answer ack: {quiz_id}")
+
+                                        selected_index = client_event.get("selectedIndex")
+                                        selected_option = client_event.get("selectedOption")
+                                        correct_index = client_event.get("correctIndex")
+                                        correct_option = client_event.get("correctOption")
+                                        is_correct = bool(client_event.get("isCorrect"))
+                                        scene_reference = visible_panels[-1]["narration"] if visible_panels else "none"
+
+                                        quiz_result_prompt = (
+                                            f"SYSTEM UPDATE FOR STORYBUILDER: Quiz {quiz_id} is complete. "
+                                            f"The visible scene right before the quiz was: {scene_reference} "
+                                            f"Quiz question: {pending_quiz['question']} "
+                                            f"Child selected option {selected_index}: {selected_option}. "
+                                            f"Correct answer was option {correct_index}: {correct_option}. "
+                                            f"The child was {'correct' if is_correct else 'incorrect'}. "
+                                            f"Explanation to ground your reaction: {pending_quiz['explanation']} "
+                                            "Now react briefly to the child's actual answer, connect it back to the visible scene and lesson, "
+                                            "and only then continue the story."
+                                        )
+                                        await gemini_session.send_client_content(
+                                            turns=types.Content(
+                                                parts=[types.Part.from_text(text=quiz_result_prompt)],
+                                                role="user",
+                                            ),
+                                            turn_complete=True,
+                                        )
+
+                            elif event_type == "quiz_presented_ack":
+                                quiz_id = client_event.get("quizId")
+                                if isinstance(quiz_id, str):
+                                    pending_quiz = pending_quiz_contexts.get(quiz_id)
+                                    if pending_quiz is not None:
+                                        pending_quiz["presented"] = True
+                                        print(f"[{session_id}] [Builder] Quiz presented ack: {quiz_id}")
+
                 except WebSocketDisconnect:
                     print(f"[{session_id}] [Builder] Client disconnected")
-                except Exception as e:
-                    print(f"[{session_id}] [Builder] Client receive error: {e}")
+                except Exception as exc:
+                    print(f"[{session_id}] [Builder] Client receive error: {exc}")
                 finally:
                     client_disconnected.set()
 
             async def receive_from_gemini():
+                nonlocal last_panel_image_b64
+
                 try:
+                    opening_recovery_attempts = 0
                     while not client_disconnected.is_set():
+                        turn_had_tool_call = False
+                        turn_had_audio = False
+                        turn_had_text = False
+
                         async for response in gemini_session.receive():
                             if client_disconnected.is_set():
                                 break
@@ -284,7 +419,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                 if model_turn:
                                     for part in model_turn.parts:
                                         if part.text:
-                                            print(f"[{session_id}] [Builder] Gemini: {part.text[:80]}...")
+                                            turn_had_text = True
+                                            preview = part.text[:80]
+                                            print(f"[{session_id}] [Builder] Gemini: {preview}...")
                                             await safe_send({
                                                 "serverContent": {
                                                     "modelTurn": {
@@ -294,7 +431,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                             })
 
                                         if part.inline_data:
-                                            b64_audio = base64.b64encode(part.inline_data.data).decode('utf-8')
+                                            turn_had_audio = True
+                                            print(f"[{session_id}] [Builder] Sending audio response ({len(part.inline_data.data)} bytes)")
+                                            b64_audio = base64.b64encode(part.inline_data.data).decode("utf-8")
                                             await safe_send({
                                                 "serverContent": {
                                                     "modelTurn": {
@@ -320,6 +459,7 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                     })
 
                             if response.tool_call:
+                                turn_had_tool_call = True
                                 for function_call in response.tool_call.function_calls:
                                     name = function_call.name
                                     args = (
@@ -327,85 +467,154 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                         if isinstance(function_call.args, dict)
                                         else (
                                             function_call.args.to_dict()
-                                            if hasattr(function_call.args, 'to_dict')
+                                            if hasattr(function_call.args, "to_dict")
                                             else dict(function_call.args)
                                         )
                                     )
                                     print(f"[{session_id}] [Builder] Tool call: {name}")
 
                                     if name == "add_comic_panel":
+                                        if pending_scene_contexts:
+                                            wait_step = (
+                                                "A new scene is already rendering and is not visible yet. "
+                                                "Do not create another scene. Keep the child engaged with the current visible scene only "
+                                                "and wait for the later system update."
+                                            )
+                                            await gemini_session.send_tool_response(
+                                                function_responses=[
+                                                    types.FunctionResponse(
+                                                        name=name,
+                                                        id=function_call.id,
+                                                        response={
+                                                            "result": wait_step,
+                                                            "runtimeContext": build_runtime_context(
+                                                                next_step=wait_step,
+                                                            ),
+                                                        }
+                                                    )
+                                                ]
+                                            )
+                                            continue
+
                                         panel_id = args.get("panel_id", "panel_unknown")
                                         narration = args.get("narration", "")
                                         speech_bubble = args.get("speech_bubble")
                                         visual_description = args.get("visual_description", "")
                                         learning_objective = args.get("learning_objective") or None
+                                        panel_index = len(visible_panels)
 
-                                        # 1. Immediately notify the UI (panel is loading)
+                                        panel_context = {
+                                            "panelId": panel_id,
+                                            "panelIndex": panel_index,
+                                            "narration": narration,
+                                            "learningObjective": learning_objective,
+                                            "visualDescription": visual_description,
+                                            "speechBubble": speech_bubble,
+                                        }
+
+                                        pending_scene_contexts[panel_id] = {
+                                            "panel_id": panel_id,
+                                            "panel_index": panel_index,
+                                            "narration": narration,
+                                            "speech_bubble": speech_bubble,
+                                            "learning_objective": learning_objective,
+                                            "visual_description": visual_description,
+                                            "image_url": None,
+                                            "image_status": "loading",
+                                        }
+
                                         await safe_send({
                                             "backendEvent": {
-                                                "type": "panel_added",
+                                                "type": "scene_stage_started",
                                                 "panelId": panel_id,
+                                                "panelIndex": panel_index,
                                                 "narration": narration,
                                                 "speechBubble": speech_bubble,
                                                 "learningObjective": learning_objective,
-                                                "imageStatus": "loading"
+                                                "isFirstScene": panel_index == 0,
                                             }
                                         })
 
-                                        # 2. Background task: generate image → send image to UI → THEN send tool
-                                        #    response to Gemini. This keeps receive_from_gemini() unblocked so
-                                        #    Gemini's audio chunks continue flowing. Gemini only gets the "continue"
-                                        #    signal after the scene image is ready — achieving sync without blocking.
-                                        ref_image = last_panel_image_b64
-                                        fc_name = name
-                                        fc_id = function_call.id
+                                        reference_image = last_panel_image_b64
+                                        function_call_id = function_call.id
 
-                                        async def build_panel_then_respond(
-                                            pid=panel_id,
-                                            vdesc=visual_description,
-                                            ref=ref_image,
-                                            _fc_name=fc_name,
-                                            _fc_id=fc_id,
+                                        if visible_panels:
+                                            current_visible_panel = visible_panels[-1]
+                                            bridge_step = (
+                                                f"A new scene ({panel_id}) is rendering in the background. "
+                                                f"The child still sees panel {current_visible_panel['panel_id']}: {current_visible_panel['narration']} "
+                                                "Keep the child engaged with the CURRENT visible scene only. "
+                                                "Acknowledge their last idea if relevant, or share one short interesting fact grounded in this current scene, "
+                                                "and you may ask one brief grounded follow-up question. "
+                                                "Do not describe the unseen new scene. Do not call add_comic_panel again. Do not call ask_quiz yet. "
+                                                "Wait for a later system update telling you the new scene is visible."
+                                            )
+                                        else:
+                                            bridge_step = (
+                                                f"The opening scene ({panel_id}) is rendering. "
+                                                "Keep the child engaged with the hero, mission, and immediate stakes in 1-2 short spoken sentences. "
+                                                "Do not describe unseen visuals. Do not call add_comic_panel again. Do not call ask_quiz yet. "
+                                                "Wait for a later system update telling you the first scene is visible."
+                                            )
+
+                                        await gemini_session.send_tool_response(
+                                            function_responses=[
+                                                types.FunctionResponse(
+                                                    name=name,
+                                                    id=function_call_id,
+                                                    response={
+                                                        "result": bridge_step,
+                                                        "runtimeContext": build_runtime_context(
+                                                            next_step=bridge_step,
+                                                            pending_panel=panel_context,
+                                                        ),
+                                                    }
+                                                )
+                                            ]
+                                        )
+
+                                        async def build_panel_in_background(
+                                            *,
+                                            pid: str = panel_id,
+                                            pindex: int = panel_index,
+                                            narration_text: str = narration,
+                                            speech: str | None = speech_bubble,
+                                            learning: str | None = learning_objective,
+                                            visual_desc: str = visual_description,
+                                            ref_image: str | None = reference_image,
                                         ):
-                                            nonlocal last_panel_image_b64
-                                            try:
-                                                print(f"[{session_id}] [Builder] Generating image for {pid} (ref={'yes' if ref else 'no'})")
-                                                url = await generate_image(vdesc, reference_image_b64=ref)
-                                                img_status = "ready" if url else "error"
-                                                await safe_send({
-                                                    "backendEvent": {
-                                                        "type": "panel_image_ready",
-                                                        "panelId": pid,
-                                                        "imageUrl": url,
-                                                        "imageStatus": img_status,
-                                                    }
-                                                })
-                                                if url:
-                                                    last_panel_image_b64 = url
-                                            except Exception as img_err:
-                                                print(f"[{session_id}] [Builder] Image gen error for {pid}: {img_err}")
-                                                await safe_send({
-                                                    "backendEvent": {
-                                                        "type": "panel_image_ready",
-                                                        "panelId": pid,
-                                                        "imageUrl": None,
-                                                        "imageStatus": "error",
-                                                    }
-                                                })
-                                            finally:
-                                                # Always unblock Gemini after image attempt (success or error)
-                                                if not client_disconnected.is_set():
-                                                    await gemini_session.send_tool_response(
-                                                        function_responses=[
-                                                            types.FunctionResponse(
-                                                                name=_fc_name,
-                                                                id=_fc_id,
-                                                                response={"result": f"Panel {pid} is visible. Continue narrating."}
-                                                            )
-                                                        ]
-                                                    )
+                                            image_url: str | None = None
+                                            image_status = "error"
 
-                                        task = asyncio.create_task(build_panel_then_respond())
+                                            try:
+                                                print(f"[{session_id}] [Builder] Generating image for {pid} (ref={'yes' if ref_image else 'no'})")
+                                                image_url = await generate_image(
+                                                    visual_desc,
+                                                    reference_image_b64=ref_image,
+                                                )
+                                                image_status = "ready" if image_url else "error"
+                                            except Exception as image_error:
+                                                print(f"[{session_id}] [Builder] Image gen error for {pid}: {image_error}")
+
+                                            pending_scene = pending_scene_contexts.get(pid)
+                                            if pending_scene is not None:
+                                                pending_scene["image_url"] = image_url
+                                                pending_scene["image_status"] = image_status
+
+                                            await safe_send({
+                                                "backendEvent": {
+                                                    "type": "scene_ready",
+                                                    "panelId": pid,
+                                                    "panelIndex": pindex,
+                                                    "narration": narration_text,
+                                                    "speechBubble": speech,
+                                                    "learningObjective": learning,
+                                                    "imageUrl": image_url,
+                                                    "imageStatus": image_status,
+                                                }
+                                            })
+
+                                        task = asyncio.create_task(build_panel_in_background())
                                         pending_tasks.add(task)
                                         task.add_done_callback(pending_tasks.discard)
 
@@ -415,20 +624,36 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                         correct_index = args.get("correct_index", 0)
                                         explanation = args.get("explanation", "")
                                         point_value = args.get("point_value", 100)
+                                        quiz_id = f"quiz_{function_call.id}"
 
-                                        # Normalize options list
-                                        parsed_options = []
-                                        for opt in options:
-                                            if isinstance(opt, str):
-                                                parsed_options.append(opt)
-                                            elif hasattr(opt, 'string_value'):
-                                                parsed_options.append(opt.string_value)
+                                        parsed_options: list[str] = []
+                                        for option in options:
+                                            if isinstance(option, str):
+                                                parsed_options.append(option)
+                                            elif hasattr(option, "string_value"):
+                                                parsed_options.append(option.string_value)
                                             else:
-                                                parsed_options.append(str(opt))
+                                                parsed_options.append(str(option))
+
+                                        quiz_context = {
+                                            "quizId": quiz_id,
+                                            "question": question,
+                                            "correctIndex": correct_index,
+                                            "pointValue": point_value,
+                                        }
+                                        pending_quiz_contexts[quiz_id] = {
+                                            "question": question,
+                                            "options": parsed_options,
+                                            "correct_index": correct_index,
+                                            "explanation": explanation,
+                                            "point_value": point_value,
+                                            "presented": False,
+                                        }
 
                                         await safe_send({
                                             "backendEvent": {
-                                                "type": "quiz_started",
+                                                "type": "quiz_presented",
+                                                "quizId": quiz_id,
                                                 "question": question,
                                                 "options": parsed_options,
                                                 "correctIndex": correct_index,
@@ -436,14 +661,23 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                                 "pointValue": point_value
                                             }
                                         })
-
-                                        # Respond immediately so Gemini doesn't hang
+                                        quiz_step = (
+                                            "The quiz is now being staged for the child. "
+                                            "Stop the story here. Do not narrate more story, do not call add_comic_panel, and do not call ask_quiz again. "
+                                            "Wait for a later system update containing the child's actual answer before you react or continue."
+                                        )
                                         await gemini_session.send_tool_response(
                                             function_responses=[
                                                 types.FunctionResponse(
                                                     name=name,
                                                     id=function_call.id,
-                                                    response={"result": "Quiz displayed. Waiting for the child's answer."}
+                                                    response={
+                                                        "result": quiz_step,
+                                                        "runtimeContext": build_runtime_context(
+                                                            next_step=quiz_step,
+                                                            quiz=quiz_context,
+                                                        ),
+                                                    }
                                                 )
                                             ]
                                         )
@@ -465,22 +699,58 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                                 types.FunctionResponse(
                                                     name=name,
                                                     id=function_call.id,
-                                                    response={"result": "Story complete signal sent to the frontend."}
+                                                    response={
+                                                        "result": "Story complete signal sent to the frontend.",
+                                                        "runtimeContext": build_runtime_context(
+                                                            next_step="Conclude warmly. The story is finished."
+                                                        ),
+                                                    }
                                                 )
                                             ]
                                         )
 
-                except Exception as e:
+                        if client_disconnected.is_set():
+                            break
+
+                        if visible_panels:
+                            opening_recovery_attempts = 0
+                            continue
+
+                        if not turn_had_tool_call and opening_recovery_attempts < MAX_OPENING_RECOVERY_ATTEMPTS:
+                            opening_recovery_attempts += 1
+                            correction_text = (
+                                "SYSTEM CORRECTION FOR STORYBUILDER: "
+                                "Do not explain your plan or use headings. "
+                                "Speak directly to the child in 1-2 short spoken sentences, "
+                                "then immediately call add_comic_panel for panel_1. "
+                                "No markdown. No meta commentary. Start now."
+                            )
+                            print(f"[{session_id}] [Builder] Recovering opening turn (attempt {opening_recovery_attempts})")
+                            await gemini_session.send_client_content(
+                                turns=types.Content(
+                                    parts=[types.Part.from_text(text=correction_text)],
+                                    role="user",
+                                ),
+                                turn_complete=True,
+                            )
+                            continue
+
+                        if not turn_had_tool_call and not turn_had_audio and turn_had_text:
+                            print(f"[{session_id}] [Builder] Gemini finished a text-only turn without creating a panel")
+
+                except Exception as exc:
                     if not client_disconnected.is_set():
-                        print(f"[{session_id}] [Builder] Gemini receive error: {e}")
-                        client_disconnected.set()
+                        print(f"[{session_id}] [Builder] Gemini receive error: {exc}")
+                        await close_client_connection(
+                            code=1011,
+                            reason="gemini_live_receive_error",
+                        )
 
             await asyncio.gather(
                 receive_from_client(),
                 receive_from_gemini()
             )
 
-            # Cancel any in-flight image generation tasks
             for task in pending_tasks:
                 task.cancel()
             if pending_tasks:
@@ -489,9 +759,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
 
             print(f"[{session_id}] [Builder] Session ended cleanly")
 
-    except Exception as e:
-        print(f"[{session_id}] [Builder] Session failed: {e}")
+    except Exception as exc:
+        print(f"[{session_id}] [Builder] Session failed: {exc}")
         try:
-            await client_ws.close(code=1011, reason=str(e))
+            await client_ws.close(code=1011, reason=str(exc))
         except Exception:
             pass

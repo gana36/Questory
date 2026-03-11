@@ -15,12 +15,15 @@ export function StoryBuilderPage() {
 
     const {
         panels,
+        stagedPanel,
         activeQuiz,
         builderPhase,
         score,
         isThinking,
         status,
         closingNarration,
+        bridgeMessage,
+        canAcceptChildInput,
         connect,
         disconnect,
         sendText,
@@ -88,7 +91,7 @@ export function StoryBuilderPage() {
 
     const handleTextSend = (e: React.FormEvent) => {
         e.preventDefault();
-        if (!textInput.trim()) return;
+        if (!textInput.trim() || !canAcceptChildInput) return;
         sendText(textInput.trim());
         setNarrationLog(prev => [...prev, `You: ${textInput.trim()}`]);
         setTextInput('');
@@ -113,7 +116,16 @@ export function StoryBuilderPage() {
         );
     }
 
-    const panelCount = panels.length;
+    const panelCount = panels.length + (stagedPanel ? 1 : 0);
+    const hasPendingScene = Boolean(stagedPanel);
+    const inputLocked = !canAcceptChildInput;
+    const pendingSceneLabel = stagedPanel
+        ? stagedPanel.imageStatus === 'loading'
+            ? panels.length === 0
+                ? 'ILLUSTRATING THE OPENING SCENE...'
+                : 'ILLUSTRATING THE NEXT SCENE...'
+            : 'SCENE READY. SWAPPING NOW...'
+        : null;
 
     return (
         <div className="min-h-screen bg-amber-50 flex flex-col">
@@ -133,6 +145,18 @@ export function StoryBuilderPage() {
                         <div className="flex items-center gap-1.5 bg-indigo-100 border-2 border-indigo-400 rounded-full px-3 py-1">
                             <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
                             <span className="font-comic text-xs text-indigo-700 tracking-wide">NARRATING...</span>
+                        </div>
+                    )}
+
+                    {pendingSceneLabel && (
+                        <div className="flex items-center gap-1.5 bg-emerald-100 border-2 border-emerald-400 rounded-full px-3 py-1">
+                            <Loader2 className={cn(
+                                'w-3.5 h-3.5 text-emerald-700',
+                                stagedPanel?.imageStatus === 'loading' && 'animate-spin'
+                            )} />
+                            <span className="font-comic text-[11px] text-emerald-800 tracking-wide">
+                                {pendingSceneLabel}
+                            </span>
                         </div>
                     )}
 
@@ -310,6 +334,14 @@ export function StoryBuilderPage() {
                                         </div>
                                     )}
 
+                                    {builderPhase === 'scene_transition' && stagedPanel && (
+                                        <div className="absolute inset-0 z-10 bg-white/15 backdrop-blur-[2px] flex items-center justify-center">
+                                            <div className="bg-black/75 text-white border-2 border-white/20 rounded-full px-4 py-2 font-comic text-sm tracking-wide shadow-xl">
+                                                SCENE CHANGE
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Speech bubble */}
                                     {activePanel.speechBubble && isImageReady && (
                                         <div className="absolute top-16 right-6 max-w-[50%] z-20">
@@ -377,24 +409,102 @@ export function StoryBuilderPage() {
                     )}
 
                     {/* Next panel loading placeholder */}
-                    {isThinking && builderPhase === 'building' && panels.length > 0 && (
-                        <div className="px-3 pt-1">
-                            <div className="h-1.5 w-32 bg-indigo-200 rounded-full overflow-hidden">
-                                <div className="h-full bg-indigo-500 rounded-full animate-pulse" style={{ width: '60%' }} />
+                    {hasPendingScene && panels.length > 0 && (
+                        <div className="px-3 pt-2">
+                            <div className="inline-flex items-center gap-2 rounded-full border-2 border-black bg-white px-3 py-1.5 shadow-sm">
+                                <Loader2 className={cn(
+                                    'w-4 h-4 text-indigo-600',
+                                    stagedPanel?.imageStatus === 'loading' && 'animate-spin'
+                                )} />
+                                <span className="font-comic text-xs text-slate-700 tracking-wide">
+                                    {bridgeMessage}
+                                </span>
                             </div>
                         </div>
                     )}
 
-                    {/* Empty state while building first panel */}
-                    {panels.length === 0 && builderPhase === 'building' && (
-                        <div className="flex-1 flex items-center justify-center p-12">
-                            <div className="text-center border-4 border-dashed border-slate-300 rounded-2xl p-12">
-                                <div className="font-comic text-3xl text-slate-300 mb-2">YOUR COMIC</div>
-                                <div className="font-comic text-xl text-slate-400">PANELS WILL APPEAR HERE</div>
-                                <div className="flex gap-1 justify-center mt-4">
-                                    <div className="w-3 h-3 bg-slate-300 rounded-full animate-bounce [animation-delay:0ms]" />
-                                    <div className="w-3 h-3 bg-slate-300 rounded-full animate-bounce [animation-delay:150ms]" />
-                                    <div className="w-3 h-3 bg-slate-300 rounded-full animate-bounce [animation-delay:300ms]" />
+                    {/* Immersive opening state while the first panel is still hidden */}
+                    {panels.length === 0 && builderPhase !== 'complete' && builderPhase !== 'connecting' && (
+                        <div className="flex-1 flex items-center justify-center p-6 md:p-10">
+                            <div className="relative w-full max-w-5xl overflow-hidden rounded-[28px] border-4 border-black bg-[linear-gradient(135deg,#fff7ed_0%,#fef3c7_38%,#dbeafe_100%)] shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+                                <div className="absolute -right-16 -top-16 h-48 w-48 rounded-full bg-indigo-300/35 blur-3xl" />
+                                <div className="absolute -left-16 bottom-0 h-40 w-40 rounded-full bg-amber-300/40 blur-3xl" />
+
+                                <div className="relative grid gap-6 md:grid-cols-[1.35fr_0.95fr] p-6 md:p-10">
+                                    <div className="space-y-5">
+                                        <div className="inline-flex items-center gap-2 rounded-full border-2 border-black bg-white/80 px-3 py-1.5 shadow-sm backdrop-blur">
+                                            <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+                                            <span className="font-comic text-xs text-slate-800 tracking-[0.18em]">
+                                                STORY GUIDE LIVE
+                                            </span>
+                                        </div>
+
+                                        <div>
+                                            <p className="font-comic text-sm uppercase tracking-[0.25em] text-slate-600 mb-2">
+                                                Opening Mission
+                                            </p>
+                                            <h1 className="font-comic text-4xl md:text-5xl leading-none text-slate-950">
+                                                {storyCtx.heroName} is stepping into a {storyCtx.topic} adventure.
+                                            </h1>
+                                        </div>
+
+                                        <p className="max-w-2xl text-sm md:text-base font-semibold text-slate-700 leading-relaxed">
+                                            {bridgeMessage}
+                                        </p>
+
+                                        {stagedPanel?.narration && (
+                                            <div className="rounded-3xl border-2 border-black bg-white/80 p-4 shadow-sm">
+                                                <div className="font-comic text-xs uppercase tracking-[0.22em] text-slate-500 mb-2">
+                                                    First Beat Locked In
+                                                </div>
+                                                <p className="text-sm md:text-base font-semibold text-slate-900 leading-relaxed">
+                                                    {stagedPanel.narration}
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        <div className="flex flex-wrap gap-2">
+                                            <div className="rounded-full border-2 border-black bg-white px-3 py-1 font-comic text-xs text-slate-800">
+                                                HERO: {storyCtx.heroName}
+                                            </div>
+                                            <div className="rounded-full border-2 border-black bg-white px-3 py-1 font-comic text-xs text-slate-800">
+                                                STYLE: {storyCtx.artStyle}
+                                            </div>
+                                            <div className="rounded-full border-2 border-black bg-white px-3 py-1 font-comic text-xs text-slate-800">
+                                                QUIZZES: {storyCtx.quizFrequency}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[24px] border-4 border-black bg-slate-950 text-white p-5 md:p-6 shadow-xl">
+                                        <div className="font-comic text-xs uppercase tracking-[0.25em] text-indigo-200 mb-4">
+                                            While The Scene Loads
+                                        </div>
+                                        <div className="space-y-4">
+                                            <div className="rounded-2xl bg-white/10 border border-white/10 p-4">
+                                                <div className="text-xs uppercase tracking-[0.18em] text-indigo-200 mb-1">
+                                                    Status
+                                                </div>
+                                                <div className="font-comic text-lg">
+                                                    {pendingSceneLabel ?? 'GUIDE IS PREPARING THE STORY'}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-2xl bg-white/10 border border-white/10 p-4">
+                                                <div className="text-xs uppercase tracking-[0.18em] text-indigo-200 mb-1">
+                                                    What You Hear
+                                                </div>
+                                                <div className="text-sm leading-relaxed text-slate-100">
+                                                    Gemini should welcome the child, frame the mission, and stay on-topic until the first scene is visible.
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-2 pt-1">
+                                                <div className="h-2 flex-1 rounded-full bg-white/15 overflow-hidden">
+                                                    <div className="h-full w-2/3 rounded-full bg-amber-300 animate-pulse" />
+                                                </div>
+                                                <div className="h-2 w-10 rounded-full bg-indigo-300/50 animate-pulse" />
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -427,12 +537,12 @@ export function StoryBuilderPage() {
                             value={textInput}
                             onChange={e => setTextInput(e.target.value)}
                             placeholder={status === 'connected' ? 'What happens next? Type or speak...' : 'Connecting...'}
-                            disabled={status !== 'connected' || builderPhase === 'quiz_active'}
+                            disabled={inputLocked}
                             className="flex-1 border-2 border-black rounded-xl font-bold text-sm placeholder:font-normal"
                         />
                         <button
                             type="submit"
-                            disabled={!textInput.trim() || status !== 'connected' || builderPhase === 'quiz_active'}
+                            disabled={!textInput.trim() || inputLocked}
                             className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white border-2 border-black rounded-xl px-3 transition-colors"
                         >
                             <Send className="w-4 h-4" />
@@ -459,13 +569,15 @@ export function StoryBuilderPage() {
             )}
 
             {/* ── Connection Lost Overlay ── */}
-            {status === 'error' && panels.length > 0 && (
+            {status === 'error' && (
                 <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
                     <div className="bg-white border-4 border-black rounded-2xl p-8 max-w-xs text-center shadow-xl">
                         <div className="text-4xl mb-3">📡</div>
                         <h2 className="font-comic text-2xl text-black mb-1">CONNECTION LOST</h2>
                         <p className="text-slate-600 text-sm mb-4">
-                            Your {panels.length} {panels.length === 1 ? 'panel' : 'panels'} and score are saved!
+                            {panels.length > 0
+                                ? `Your ${panels.length} ${panels.length === 1 ? 'panel' : 'panels'} and score are saved!`
+                                : 'The guide lost the connection before the first scene could land.'}
                         </p>
                         <button
                             onClick={manualReconnect}
