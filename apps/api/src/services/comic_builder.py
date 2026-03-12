@@ -307,7 +307,15 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
     pending_scene_contexts: dict[str, dict[str, Any]] = {}
     pending_quiz_contexts: dict[str, dict[str, Any]] = {}
     last_panel_image_b64: str | None = None
-    visible_panels: list[dict[str, Any]] = []
+    
+    # Load any previously saved session state
+    existing_session = load_story_session(session_id) or {}
+    visible_panels: list[dict[str, Any]] = existing_session.get("panels", [])
+    if visible_panels:
+        last_panel = visible_panels[-1]
+        if last_panel.get("image_url"):
+            last_panel_image_b64 = last_panel["image_url"]
+
     prebuilt_panels = _load_prebuilt_panels(session_id)
 
     async def close_client_connection(code: int, reason: str):
@@ -542,6 +550,27 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
 
         async with client.aio.live.connect(model=MODEL_ID, config=config) as gemini_session:
             print(f"[{session_id}] [Builder] Connected to Gemini Live ({MODEL_ID})")
+            
+            # If we restored panels from a previous session, inform the frontend immediately.
+            if visible_panels:
+                await safe_send({
+                    "backendEvent": {
+                        "type": "restore_panels",
+                        "panels": [
+                            {
+                                "panelId": p["panel_id"],
+                                "panelIndex": p["panel_index"],
+                                "narration": p["narration"],
+                                "speechBubble": p.get("speech_bubble"),
+                                "learningObjective": p.get("learning_objective"),
+                                "imageUrl": p.get("image_url"),
+                                "imageStatus": p.get("image_status", "ready"),
+                                "source": p.get("source", "live"),
+                            }
+                            for p in visible_panels
+                        ]
+                    }
+                })
 
             async def receive_from_client():
                 nonlocal last_panel_image_b64
@@ -597,6 +626,8 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                             "speech_bubble": pending_scene.get("speech_bubble"),
                                             "learning_objective": pending_scene.get("learning_objective"),
                                             "source": pending_scene.get("source"),
+                                            "image_url": pending_scene.get("image_url"),
+                                            "image_status": pending_scene.get("image_status"),
                                         })
                                         if pending_scene.get("image_url"):
                                             last_panel_image_b64 = pending_scene["image_url"]
@@ -680,6 +711,19 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                 except Exception as exc:
                     print(f"[{session_id}] [Builder] Client receive error: {exc}")
                 finally:
+                    # Save story progress on disconnect
+                    if visible_panels:
+                        from src.services.story_session_store import save_story_session, load_story_session
+                        
+                        existing = load_story_session(session_id) or {}
+                        
+                        # Only update if we aren't already marked completed.
+                        status = existing.get("status", "abrupt")
+                        save_story_session(session_id, {
+                            **existing,
+                            "status": status,
+                            "panels": visible_panels,
+                        })
                     client_disconnected.set()
 
             async def receive_from_gemini():
@@ -929,6 +973,14 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                     elif name == "story_complete":
                                         closing_narration = args.get("closing_narration", "")
                                         total_panels = args.get("total_panels", 0)
+
+                                        from src.services.story_session_store import save_story_session
+                                        save_story_session(session_id, {
+                                            "status": "completed",
+                                            "closingNarration": closing_narration,
+                                            "totalPanels": total_panels,
+                                            "panels": visible_panels,
+                                        })
 
                                         await safe_send({
                                             "backendEvent": {

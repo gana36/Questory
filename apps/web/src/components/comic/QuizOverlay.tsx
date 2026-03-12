@@ -111,11 +111,14 @@ export function QuizOverlay({ quiz, onAnswer }: QuizOverlayProps) {
                         'overflow-hidden transition-all duration-500',
                         showExplanation ? 'max-h-40 opacity-100 mb-4' : 'max-h-0 opacity-0'
                     )}>
-                        <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-3">
-                            <p className="text-sm font-semibold text-amber-900 mb-1">
-                                {selectedIndex === quiz.correctIndex ? '🎉 Correct!' : '💡 Good try!'}
+                        <div className={cn(
+                            "border-4 border-black rounded-xl p-3 flex flex-col gap-1 shadow-[4px_4px_0px_rgba(0,0,0,1)]",
+                            selectedIndex === quiz.correctIndex ? "bg-emerald-100" : "bg-orange-100"
+                        )}>
+                            <p className="font-comic font-black text-black uppercase tracking-wide">
+                                {selectedIndex === quiz.correctIndex ? 'Correct!' : 'Good try!'}
                             </p>
-                            <p className="text-sm text-amber-800 leading-snug">
+                            <p className="text-sm text-slate-800 font-semibold leading-snug">
                                 {quiz.explanation}
                             </p>
                         </div>

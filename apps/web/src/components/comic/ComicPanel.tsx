@@ -73,8 +73,8 @@ export function ComicPanel({ panel, isLatest, isSplash = false }: ComicPanelProp
             <div className="border-t-4 border-black bg-amber-50 px-2 py-1.5">
                 {panel.learningObjective && (
                     <div className="flex items-center gap-1 mb-1">
-                        <span className="text-[10px] bg-indigo-100 border border-indigo-300 text-indigo-800 font-bold rounded-full px-2 py-0.5 leading-tight">
-                            📚 {panel.learningObjective}
+                        <span className="text-[10px] bg-yellow-400 border-2 border-black text-black font-bold rounded-full px-2 py-0.5 leading-tight shadow-sm">
+                            {panel.learningObjective}
                         </span>
                     </div>
                 )}

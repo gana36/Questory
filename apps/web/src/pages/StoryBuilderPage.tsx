@@ -134,10 +134,17 @@ export function StoryBuilderPage() {
         connect,
         disconnect,
         sendText,
+        forceSendText,
         submitQuizAnswer,
         getVolume,
         manualReconnect,
     } = useStoryBuilder(sessionId ?? 'default');
+
+    const handleConcludeStory = useCallback(() => {
+        if (status === 'connected') {
+            forceSendText("SYSTEM DIRECTIVE: The player wishes to conclude the story now. Please wrap up the adventure in one or two sentences and invoke the story_complete tool.");
+        }
+    }, [status, forceSendText]);
 
     const [textInput, setTextInput] = useState('');
     const [narrationLog, setNarrationLog] = useState<string[]>([]);
@@ -532,8 +539,8 @@ export function StoryBuilderPage() {
                                     <div className="absolute bottom-0 left-0 right-0 z-20 px-6 py-4">
                                         {activePanel.learningObjective && (
                                             <div className="mb-2">
-                                                <span className="text-xs bg-indigo-500/80 backdrop-blur-sm border border-indigo-300/50 text-white font-bold rounded-full px-3 py-1 leading-tight">
-                                                    📚 {activePanel.learningObjective}
+                                                <span className="text-xs bg-yellow-400 border-2 border-black text-black font-bold rounded-full px-3 py-1 leading-tight shadow-md">
+                                                    {activePanel.learningObjective}
                                                 </span>
                                             </div>
                                         )}
@@ -728,6 +735,17 @@ export function StoryBuilderPage() {
                     <div className="hidden sm:flex bg-yellow-400 border-2 border-black rounded-full px-3 py-1.5 font-comic text-sm text-black font-bold whitespace-nowrap">
                         ⭐ {score}
                     </div>
+                    
+                    {/* Conclude Button */}
+                    <button
+                        type="button"
+                        onClick={handleConcludeStory}
+                        disabled={status !== 'connected' || inputLocked}
+                        className="bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-comic text-xs border-2 border-black rounded-xl px-4 py-1.5 transition-colors uppercase font-bold tracking-wide whitespace-nowrap"
+                        title="End this adventure"
+                    >
+                        Finish Story
+                    </button>
                 </div>
             )}
 

@@ -4,6 +4,7 @@ import { LandingPage } from '@/pages/LandingPage';
 import { CreateStoryPage } from '@/pages/CreateStoryPage';
 import { StoryPlayerPage } from '@/pages/StoryPlayerPage';
 import { StoryBuilderPage } from '@/pages/StoryBuilderPage';
+import { StoryViewerPage } from '@/pages/StoryViewerPage';
 import { LibraryPage } from '@/pages/LibraryPage';
 import { AdminDebugPage } from '@/pages/AdminDebugPage';
 
@@ -15,6 +16,7 @@ function App() {
           <Route index element={<LandingPage />} />
           <Route path="create" element={<CreateStoryPage />} />
           <Route path="play/:sessionId" element={<StoryPlayerPage />} />
+          <Route path="view/:sessionId" element={<StoryViewerPage />} />
           <Route path="build/:sessionId" element={<StoryBuilderPage />} />
           <Route path="library" element={<LibraryPage />} />
           <Route path="admin/debug" element={<AdminDebugPage />} />

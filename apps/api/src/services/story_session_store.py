@@ -39,6 +39,16 @@ def load_story_session(session_id: str) -> dict[str, Any] | None:
         value = store.get(session_id)
         return value if isinstance(value, dict) else None
 
+def list_all_sessions() -> list[dict[str, Any]]:
+    with _STORE_LOCK:
+        store = _read_store()
+        sessions = []
+        for session_id, session_data in store.items():
+            if isinstance(session_data, dict):
+                session_data["id"] = session_id
+                sessions.append(session_data)
+        return sessions
+
 
 def save_story_session(session_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     with _STORE_LOCK:

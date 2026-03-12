@@ -110,6 +110,10 @@ type StoryBuilderAction =
     | {
         type: 'STORY_COMPLETE';
         closingNarration: string;
+      }
+    | {
+        type: 'RESTORE_PANELS';
+        panels: ComicPanelState[];
       };
 
 const AGE_LABELS: Record<number, string> = {
@@ -399,6 +403,14 @@ function storyBuilderReducer(
                 builderPhase: 'complete',
                 bridgeMessage: 'The story has reached its ending.',
             };
+        case 'RESTORE_PANELS':
+            return {
+                ...state,
+                panels: action.panels,
+                stagedPanel: null,
+                builderPhase: 'scene_live',
+                bridgeMessage: 'Welcome back! Your guide is picking up the story where you left off.',
+            };
         default:
             return state;
     }
@@ -475,6 +487,25 @@ export function useStoryBuilder(sessionId: string) {
 
     const handleBackendEvent = useCallback((event: Record<string, unknown>) => {
         const type = event.type as string;
+
+        if (type === 'restore_panels') {
+            const panelsPayload = event.panels as Array<Record<string, unknown>>;
+            const mappedPanels: ComicPanelState[] = panelsPayload.map(p => ({
+                id: p.panelId as string,
+                panelIndex: p.panelIndex as number,
+                narration: p.narration as string,
+                speechBubble: p.speechBubble as string | undefined,
+                learningObjective: p.learningObjective as string | undefined,
+                imageUrl: p.imageUrl as string | undefined,
+                imageStatus: (p.imageStatus as 'ready' | 'loading' | 'error') || 'ready',
+            }));
+
+            dispatch({
+                type: 'RESTORE_PANELS',
+                panels: mappedPanels,
+            });
+            return;
+        }
 
         if (type === 'scene_stage_started' || type === 'panel_added') {
             dispatch({
@@ -683,6 +714,21 @@ export function useStoryBuilder(sessionId: string) {
             }));
         }
     }, [canAcceptChildInput]);
+
+    const forceSendText = useCallback((text: string) => {
+        if (!text.trim()) {
+            return;
+        }
+
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                clientContent: {
+                    turns: [{ role: 'user', parts: [{ text }] }],
+                    turnComplete: true
+                }
+            }));
+        }
+    }, []);
 
     const setupWsHandlers = useCallback((ws: WebSocket) => {
         ws.onmessage = async (event) => {
@@ -986,6 +1032,7 @@ export function useStoryBuilder(sessionId: string) {
         connect,
         disconnect,
         sendText,
+        forceSendText,
         submitQuizAnswer,
         getVolume,
         manualReconnect,
