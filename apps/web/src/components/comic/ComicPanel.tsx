@@ -5,16 +5,17 @@ interface ComicPanelProps {
     panel: ComicPanelState;
     isLatest: boolean;
     isSplash?: boolean; // first panel gets wider layout
+    className?: string;
 }
 
-export function ComicPanel({ panel, isLatest, isSplash = false }: ComicPanelProps) {
+export function ComicPanel({ panel, isLatest, isSplash = false, className }: ComicPanelProps) {
     const isLoading = panel.imageStatus === 'loading';
 
     return (
         <div
             className={cn(
                 'relative overflow-hidden border-4 border-black rounded-sm flex flex-col bg-slate-100',
-                isSplash ? 'col-span-2 aspect-video' : 'aspect-square',
+                className || (isSplash ? 'col-span-2 aspect-video' : 'aspect-square'),
                 isLatest && 'border-yellow-400 shadow-[0_0_24px_rgba(234,179,8,0.7)]'
             )}
         >

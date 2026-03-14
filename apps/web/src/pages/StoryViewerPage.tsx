@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, Loader2, Star, Target } from 'lucide-react';
+import { ArrowLeft, Loader2, Star, Target, Play } from 'lucide-react';
 import { ComicPanel } from '@/components/comic/ComicPanel';
+import { SlideshowOverlay } from '@/components/comic/SlideshowOverlay';
 import { getMediaUrl } from '@/lib/utils';
 
 interface StoryPanelData {
@@ -25,12 +26,51 @@ interface SavedStory {
     panels: StoryPanelData[];
 }
 
+const getDynamicPanelClasses = (index: number, total: number) => {
+    const getSpan = (cols: number) => {
+        const baseCells = total + 1;
+        const rem = baseCells % cols;
+        const pad = rem === 0 ? 0 : cols - rem;
+        const MathW = (baseCells < cols) ? total : rem;
+        
+        let baseSpan = index === 0 ? 2 : 1;
+        if (cols === 1) return baseSpan;
+        
+        if (pad > 0 && index >= total - MathW) {
+            const d = (total - 1) - index;
+            const extra = Math.floor(pad / MathW) + (d < (pad % MathW) ? 1 : 0);
+            return baseSpan + extra;
+        }
+        return baseSpan;
+    };
+
+    const smSpan = getSpan(1); 
+    const mdSpan = getSpan(2);
+    const lgSpan = getSpan(3);
+
+    const classes = [
+        smSpan === 2 ? 'col-span-2 aspect-video' : 'col-span-1 aspect-square',
+        
+        mdSpan === 1 ? 'md:col-span-1 md:aspect-square' :
+        mdSpan === 2 ? 'md:col-span-2 md:aspect-video' :
+        'md:col-span-3 md:aspect-[3/1]',
+        
+        lgSpan === 1 ? 'lg:col-span-1 lg:aspect-square' :
+        lgSpan === 2 ? 'lg:col-span-2 lg:aspect-video' :
+        lgSpan === 3 ? 'lg:col-span-3 lg:aspect-[3/1]' :
+        'lg:col-span-4 lg:aspect-[4/1]'
+    ];
+    
+    return classes.join(' ');
+};
+
 export function StoryViewerPage() {
     const { sessionId } = useParams();
     const [story, setStory] = useState<SavedStory | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [hasSaved, setHasSaved] = useState(false);
+    const [slideshowActive, setSlideshowActive] = useState(false);
 
     useEffect(() => {
         fetch(`http://localhost:8000/api/story-session/${sessionId}`)
@@ -87,6 +127,7 @@ export function StoryViewerPage() {
     }
 
     const title = story.topic || (story.heroName ? `${story.heroName}'s Adventure` : 'Questory Adventure');
+    const totalPanels = story.panels.length;
 
     return (
         <div className="min-h-screen bg-amber-50 flex flex-col md:flex-row">
@@ -122,21 +163,31 @@ export function StoryViewerPage() {
                         )}
                     </div>
                     
-                    <button
-                        onClick={handleSaveToLibrary}
-                        disabled={isSaving || hasSaved || story.is_permanently_saved}
-                        className={`w-full font-comic text-sm px-4 py-2 mt-4 rounded-xl border-2 border-black transition-colors flex items-center justify-center gap-2 ${
-                            hasSaved || story.is_permanently_saved
-                                ? "bg-green-500 text-white cursor-not-allowed" 
-                                : "bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-50"
-                        }`}
-                    >
-                        {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-                        {hasSaved || story.is_permanently_saved ? 'Saved Permanently ✓' : 'Save to Library File'}
-                    </button>
+                    <div className="flex flex-col gap-3">
+                        <button
+                            onClick={() => setSlideshowActive(true)}
+                            className="bg-indigo-600 text-white font-comic text-sm border-2 border-black font-bold uppercase py-2 px-4 rounded-xl shadow-[4px_4px_0px_rgba(0,0,0,1)] hover:translate-y-[2px] hover:shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-[4px] active:shadow-none transition-all flex items-center justify-center gap-2"
+                        >
+                            <Play className="w-5 h-5 fill-white" />
+                            Play Slideshow
+                        </button>
+                        
+                        <button
+                            onClick={handleSaveToLibrary}
+                            disabled={isSaving || hasSaved || story.is_permanently_saved}
+                            className={`font-comic text-sm border-2 border-black font-bold uppercase py-2 px-4 rounded-xl shadow-[4px_4px_0px_rgba(0,0,0,1)] transition-all flex items-center justify-center gap-2 ${
+                                hasSaved || story.is_permanently_saved 
+                                    ? "bg-green-500 text-white shadow-none translate-y-[4px]" 
+                                    : "bg-orange-500 text-white hover:translate-y-[2px] hover:shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-[4px] active:shadow-none"
+                            }`}
+                        >
+                            {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                            {hasSaved || story.is_permanently_saved ? 'Saved Permanently ✓' : 'Save to Library File'}
+                        </button>
+                    </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto mb-6 pr-2">
+                <div className="flex-1 overflow-y-auto mt-6 mb-6 pr-2">
                     <h3 className="font-comic font-bold text-black uppercase border-b-2 border-black mb-3 pb-1">Chapters</h3>
                     <ul className="space-y-3">
                         {story.panels.map((p, idx) => (
@@ -162,23 +213,28 @@ export function StoryViewerPage() {
 
             {/* Right Side Scrolling Layout */}
             <div className="flex-1 md:ml-80 p-4 md:p-8 lg:p-12 overflow-y-auto w-full">
-                <div className="max-w-2xl mx-auto flex flex-col gap-12 pb-24">
-                    {story.panels.map((panelData, index) => {
-                         const comicPanelState = {
-                             id: panelData.panelId,
-                             panelIndex: index,
-                             narration: panelData.narration,
-                             speechBubble: panelData.speechBubble,
-                             learningObjective: panelData.learningObjective,
-                             imageUrl: getMediaUrl(panelData.imageUrl),
-                             imageStatus: panelData.imageUrl ? 'ready' as const : 'loading' as const,
-                         };
-                         return (
-                            <div key={panelData.panelId} className="w-full flex justify-center">
-                               <ComicPanel panel={comicPanelState} isLatest={false} isSplash={index === 0} />
-                            </div>
-                         );
-                    })}
+                <div className="w-full max-w-[1600px] mx-auto flex flex-col pb-24">
+                    <div className="bg-white border-4 border-black grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-[3px] p-[3px]">
+                        {story.panels.map((panelData, index) => {
+                             const comicPanelState = {
+                                 id: panelData.panelId,
+                                 panelIndex: index,
+                                 narration: panelData.narration,
+                                 speechBubble: panelData.speechBubble,
+                                 learningObjective: panelData.learningObjective,
+                                 imageUrl: getMediaUrl(panelData.imageUrl),
+                                 imageStatus: panelData.imageUrl ? 'ready' as const : 'loading' as const,
+                             };
+                             return (
+                                <ComicPanel 
+                                    key={panelData.panelId} 
+                                    panel={comicPanelState} 
+                                    isLatest={false} 
+                                    className={getDynamicPanelClasses(index, totalPanels)}
+                                />
+                             );
+                        })}
+                    </div>
 
                     {/* Closing Section */}
                     {story.status === 'completed' && story.closingNarration ? (
@@ -199,6 +255,13 @@ export function StoryViewerPage() {
                     )}
                 </div>
             </div>
+
+            {slideshowActive && (
+                <SlideshowOverlay 
+                    panels={story.panels} 
+                    onClose={() => setSlideshowActive(false)} 
+                />
+            )}
         </div>
     );
 }

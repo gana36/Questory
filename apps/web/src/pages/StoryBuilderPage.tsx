@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { API_URL } from '@/config';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
-import { Mic, MicOff, Send, BookOpen, Loader2 } from 'lucide-react';
+import { Mic, MicOff, Send, BookOpen, Loader2, Play } from 'lucide-react';
 import {
     useStoryBuilder,
     type StoryHeadstart,
@@ -10,9 +10,47 @@ import {
     type StorySessionContext,
 } from '@/hooks/useStoryBuilder';
 import { ComicPanel } from '@/components/comic/ComicPanel';
+import { SlideshowOverlay } from '@/components/comic/SlideshowOverlay';
 import { QuizOverlay } from '@/components/comic/QuizOverlay';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+const getDynamicPanelClasses = (index: number, total: number) => {
+    const getSpan = (cols: number) => {
+        const baseCells = total + 1;
+        const rem = baseCells % cols;
+        const pad = rem === 0 ? 0 : cols - rem;
+        const MathW = (baseCells < cols) ? total : rem;
+        
+        let baseSpan = index === 0 ? 2 : 1;
+        if (cols === 1) return baseSpan;
+        
+        if (pad > 0 && index >= total - MathW) {
+            const d = (total - 1) - index;
+            const extra = Math.floor(pad / MathW) + (d < (pad % MathW) ? 1 : 0);
+            return baseSpan + extra;
+        }
+        return baseSpan;
+    };
+
+    const smSpan = getSpan(1); 
+    const mdSpan = getSpan(2);
+    const lgSpan = getSpan(3);
+
+    const classes = [
+        smSpan === 2 ? 'col-span-2 aspect-video' : 'col-span-1 aspect-square',
+        
+        mdSpan === 1 ? 'md:col-span-1 md:aspect-square' :
+        mdSpan === 2 ? 'md:col-span-2 md:aspect-video' :
+        'md:col-span-3 md:aspect-[3/1]',
+        
+        lgSpan === 1 ? 'lg:col-span-1 lg:aspect-square' :
+        lgSpan === 2 ? 'lg:col-span-2 lg:aspect-video' :
+        lgSpan === 3 ? 'lg:col-span-3 lg:aspect-[3/1]' :
+        'lg:col-span-4 lg:aspect-[4/1]'
+    ];
+    
+    return classes.join(' ');
+};
 
 function normalizeHeadstartPanel(raw: unknown, index: number): StoryHeadstartPanel | null {
     if (!raw || typeof raw !== 'object') {
@@ -172,6 +210,7 @@ export function StoryBuilderPage() {
     const [volume, setVolume] = useState(0);
     const [isSaving, setIsSaving] = useState(false);
     const [hasSaved, setHasSaved] = useState(false);
+    const [slideshowActive, setSlideshowActive] = useState(false);
 
     const panelsEndRef = useRef<HTMLDivElement>(null);
     const narrationEndRef = useRef<HTMLDivElement>(null);
@@ -408,6 +447,13 @@ export function StoryBuilderPage() {
                             ⭐ Final Score: {score} PTS
                         </div>
                         <button
+                            onClick={() => setSlideshowActive(true)}
+                            className="bg-indigo-600 text-white font-comic text-sm px-4 py-1.5 rounded-full border-2 border-black hover:bg-indigo-700 transition-colors flex items-center gap-2"
+                        >
+                            <Play className="w-4 h-4 fill-white" />
+                            Watch Slideshow
+                        </button>
+                        <button
                             onClick={handleSaveToLibrary}
                             disabled={isSaving || hasSaved}
                             className={cn(
@@ -631,14 +677,14 @@ export function StoryBuilderPage() {
 
                     {/* Complete state — show all panels in full grid */}
                     {builderPhase === 'complete' && panels.length > 0 && (
-                        <div className="p-2">
-                            <div className="bg-black border-4 border-black grid grid-cols-2 lg:grid-cols-3 gap-[3px] p-[3px]">
+                        <div className="p-2 w-full max-w-[1600px] mx-auto">
+                            <div className="bg-white border-4 border-black grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-[3px] p-[3px]">
                                 {panels.map((panel, idx) => (
                                     <ComicPanel
                                         key={panel.id}
                                         panel={panel}
                                         isLatest={false}
-                                        isSplash={idx === 0}
+                                        className={getDynamicPanelClasses(idx, panels.length)}
                                     />
                                 ))}
                             </div>
@@ -750,6 +796,13 @@ export function StoryBuilderPage() {
                     <div ref={panelsEndRef} />
                 </main>
             </div>
+
+            {slideshowActive && (
+                <SlideshowOverlay 
+                    panels={panels} 
+                    onClose={() => setSlideshowActive(false)} 
+                />
+            )}
 
             {/* ── Bottom Input Bar ── */}
             {builderPhase !== 'complete' && (

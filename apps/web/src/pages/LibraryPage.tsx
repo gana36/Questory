@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Link } from 'react-router-dom';
 import { BookOpen, Loader2, Star } from 'lucide-react';
 import { getMediaUrl } from '@/lib/utils';
+import { ComicPanel } from '@/components/comic/ComicPanel';
 
 interface StoryPanel {
+    id?: string;
+    panelIndex?: number;
+    narration?: string;
+    speechBubble?: string;
+    learningObjective?: string;
     imageUrl?: string;
 }
 
@@ -56,44 +61,67 @@ export function LibraryPage() {
                         <Loader2 className="w-12 h-12 text-indigo-600 animate-spin" />
                     </div>
                 ) : stories.length > 0 ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    <div className="flex flex-col gap-12">
                         {stories.map((story) => (
-                            <Card key={story.id} className="overflow-hidden bg-white border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-1 transition-all">
-                                <div className="h-40 bg-zinc-100 flex items-center justify-center border-b-4 border-black relative overflow-hidden">
-                                    {story.panels && story.panels.length > 0 && story.panels[0].imageUrl ? (
-                                        <img src={getMediaUrl(story.panels[0].imageUrl)} alt="Cover" className="w-full h-full object-cover" />
-                                    ) : (
-                                        <BookOpen className="w-16 h-16 text-slate-300" />
-                                    )}
-                                    <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
+                            <div key={story.id} className="bg-white border-4 border-black rounded-2xl p-6 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 border-b-4 border-black pb-4">
+                                    <div>
+                                        <div className="flex items-center gap-3 mb-1">
+                                            <h2 className="text-3xl font-comic font-bold text-black uppercase line-clamp-1" title={story.topic || 'Questory Adventure'}>
+                                                {story.topic || 'Questory Adventure'}
+                                            </h2>
+                                            {story.status === "completed" && (
+                                                <span className="bg-emerald-400 border-2 border-black text-black font-comic text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide whitespace-nowrap">
+                                                    Finished
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="text-slate-600 font-semibold">Hero: {story.heroName || 'Unknown'} • {story.totalPanels || (story.panels ? story.panels.length : 0)} Panels</p>
+                                    </div>
+                                    <div className="flex items-center gap-3 w-full sm:w-auto">
                                         {story.score !== undefined && story.score > 0 && (
-                                            <div className="bg-yellow-400 border-2 border-black text-black font-comic text-xs px-2 py-0.5 rounded-full font-bold uppercase tracking-wide flex items-center shadow-sm">
-                                                <Star className="w-3 h-3 mr-1 fill-black" />
+                                            <div className="bg-yellow-400 border-2 border-black text-black font-comic text-sm px-3 py-1.5 rounded-xl font-bold uppercase tracking-wide flex items-center shadow-sm whitespace-nowrap">
+                                                <Star className="w-4 h-4 mr-1 fill-black" />
                                                 {story.score} PTS
                                             </div>
                                         )}
-                                        {story.status === "completed" && (
-                                            <div className="bg-emerald-400 border-2 border-black text-black font-comic text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide shadow-sm">
-                                                Finished
-                                            </div>
-                                        )}
+                                        <Link to={`/view/${story.id}`} className="w-full sm:w-auto">
+                                            <Button className="w-full bg-yellow-400 hover:bg-yellow-500 text-black font-comic text-sm border-2 border-black rounded-xl transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:-translate-y-0.5">
+                                                Read <BookOpen className="w-4 h-4 ml-1" />
+                                            </Button>
+                                        </Link>
                                     </div>
                                 </div>
-                                <CardHeader className="pb-2 bg-amber-50">
-                                    <CardTitle className="font-comic text-xl text-black line-clamp-2 uppercase leading-tight mb-1" title={story.topic || 'Questory Adventure'}>
-                                        {story.topic || 'Questory Adventure'}
-                                    </CardTitle>
-                                    <CardDescription className="text-slate-600 font-semibold text-sm">Hero: {story.heroName || 'Unknown'}</CardDescription>
-                                </CardHeader>
-                                <CardContent className="pt-4 bg-amber-50 border-t-2 border-black/10 flex justify-between items-center">
-                                    <span className="text-sm font-bold text-slate-500">{story.totalPanels || (story.panels ? story.panels.length : 0)} Panels</span>
-                                    <Link to={`/view/${story.id}`}>
-                                        <Button className="bg-yellow-400 hover:bg-yellow-500 text-black font-comic text-sm border-2 border-black rounded-xl transition-colors">
-                                            Read Comic <BookOpen className="w-4 h-4 ml-1" />
-                                        </Button>
-                                    </Link>
-                                </CardContent>
-                            </Card>
+                                
+                                {/* Comic Panels Strip */}
+                                {story.panels && story.panels.length > 0 ? (
+                                    <div className="flex overflow-x-auto gap-6 pb-6 pt-2 px-2 snap-x hide-scrollbar" style={{ maskImage: 'linear-gradient(to right, black 95%, transparent 100%)' }}>
+                                        {story.panels.map((panel, idx) => {
+                                             const comicPanelState = {
+                                                 id: panel.id || `panel_${idx}`,
+                                                 panelIndex: panel.panelIndex !== undefined ? panel.panelIndex : idx,
+                                                 narration: panel.narration || '',
+                                                 speechBubble: panel.speechBubble,
+                                                 learningObjective: panel.learningObjective,
+                                                 imageUrl: getMediaUrl(panel.imageUrl),
+                                                 imageStatus: panel.imageUrl ? 'ready' as const : 'loading' as const,
+                                             };
+                                             return (
+                                                 <div key={idx} className="flex-none w-[280px] md:w-[320px] lg:w-[350px] snap-start hover:scale-[1.02] transition-transform duration-200">
+                                                     <ComicPanel panel={comicPanelState} isLatest={false} isSplash={false} />
+                                                 </div>
+                                             );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div className="py-16 bg-zinc-50 border-2 border-dashed border-slate-300 rounded-xl flex items-center justify-center">
+                                        <div className="text-center">
+                                            <BookOpen className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                                            <p className="font-comic text-slate-400 text-lg">No panels to display</p>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
                         ))}
                     </div>
                 ) : (
@@ -109,6 +137,16 @@ export function LibraryPage() {
                     </div>
                 )}
             </div>
+            {/* Adding basic custom scrollbar hiding for clean look */}
+            <style>{`
+                .hide-scrollbar::-webkit-scrollbar {
+                    display: none;
+                }
+                .hide-scrollbar {
+                    -ms-overflow-style: none;
+                    scrollbar-width: none;
+                }
+            `}</style>
         </div>
     );
 }
