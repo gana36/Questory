@@ -2,7 +2,7 @@
 
 An AI-powered interactive learning adventure. Children choose a topic, pick a hero, and experience a personalized comic book story generated in real time by a live AI voice guide. Educational facts are woven into the narrative and tested via embedded quizzes.
 
-Built for the [Google Gemini & Google Cloud Hackathon](https://googleai.devpost.com/) — **Creative Storyteller** category.
+Built for the [Gemini Live Agent Challenge](https://geminiliveagentchallenge.devpost.com/?ref_feature=challenge&ref_medium=discover) — **Creative Storyteller** category.
 
 ---
 
