@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { API_URL } from '@/config';
 import { Loader2, X } from 'lucide-react';
 import { getMediaUrl } from '@/lib/utils';
 
@@ -25,7 +26,7 @@ export function SlideshowOverlay({ panels, onClose }: { panels: any[], onClose: 
         
         const fetchAudio = async () => {
             try {
-                const response = await fetch('http://localhost:8000/api/tts', {
+                const response = await fetch(`${API_URL}/api/tts`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: currentPanel.narration })

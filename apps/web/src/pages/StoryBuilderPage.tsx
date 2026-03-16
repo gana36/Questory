@@ -187,7 +187,7 @@ export function StoryBuilderPage() {
 
         // 2. Call the forced completion + extraction endpoint.
         try {
-            const res = await fetch(`http://localhost:8000/api/library/force-complete/${sessionId}`, {
+            const res = await fetch(`${API_URL}/api/library/force-complete/${sessionId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ panels })
@@ -220,7 +220,7 @@ export function StoryBuilderPage() {
         if (!sessionId) return;
         setIsSaving(true);
         try {
-            const res = await fetch(`http://localhost:8000/api/library/save/${sessionId}`, {
+            const res = await fetch(`${API_URL}/api/library/save/${sessionId}`, {
                 method: 'POST'
             });
             if (res.ok) {

@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from fastapi.responses import Response
 
 from src.services.comic_builder import proxy_comic_builder_session
-from src.services.story_session_store import load_story_session
+from src.services.story_session_store import load_story_session, save_story_session
+from src.services.gcs_library import save_story_to_gcs, list_stories_from_gcs, load_story_from_gcs
 
 router = APIRouter()
 
@@ -87,95 +88,58 @@ async def comic_builder_websocket(websocket: WebSocket, session_id: str):
 
 @router.get("/story-session/{session_id}")
 async def get_story_session(session_id: str):
-    from pathlib import Path
-    import json
-    
-    # Try permanent first
-    data_dir = Path(__file__).parent.parent.parent / "data" / session_id
-    json_path = data_dir / "story.json"
-    
-    story_session = None
-    if json_path.exists():
-        try:
-             story_session = json.loads(json_path.read_text("utf-8"))
-        except Exception:
-             pass
+    # 1. Check in-memory temp store (active sessions)
+    story_session = load_story_session(session_id)
 
-    # Fallback to temporary
+    # 2. Fall back to GCS (saved/completed stories)
     if not story_session:
-        story_session = load_story_session(session_id)
-        
+        story_session = load_story_from_gcs(session_id)
+
     if not story_session:
         raise HTTPException(status_code=404, detail="Story session not found")
-        
+
     return normalize_story_session(story_session)
 
 @router.post("/library/force-complete/{session_id}")
 async def force_complete_library_story(session_id: str, request: Request):
-    from src.services.story_session_store import load_story_session, save_story_session, save_story_to_library
-    
-    # 1. Ensure it exists
-    curr = load_story_session(session_id)
-    if not curr:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    # Get frontend panels if provided
+    curr = load_story_session(session_id) or {}
+
     try:
         req_data = await request.json()
         frontend_panels = req_data.get("panels", [])
     except Exception:
         frontend_panels = []
 
-    # 2. Force close the status right now
-    save_updates = {
-        "status": "completed", 
-        "closingNarration": "The hero abruptly concluded their adventure!"
-    }
     if frontend_panels:
-        save_updates["panels"] = frontend_panels
-        
-    save_story_session(session_id, save_updates)
-    
-    # 3. Explicitly extract and save the files 
+        curr["panels"] = frontend_panels
+    curr["status"] = "completed"
+    curr["closingNarration"] = curr.get("closingNarration", "The hero concluded their adventure!")
+
     try:
-        saved_session = save_story_to_library(session_id)
-        return {"status": "success", "story": saved_session}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        save_story_to_gcs(session_id, curr)
+        save_story_session(session_id, {"is_permanently_saved": True, "status": "completed"})
+        return {"status": "success", "id": session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/library/save/{session_id}")
 async def save_library_story(session_id: str):
-    from src.services.story_session_store import save_story_to_library
+    session = load_story_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     try:
-        saved_session = save_story_to_library(session_id)
-        return {"status": "success", "story": saved_session}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        save_story_to_gcs(session_id, session)
+        save_story_session(session_id, {"is_permanently_saved": True})
+        return {"status": "success", "id": session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/library")
 async def get_library():
-    import json
-    from pathlib import Path
-
-    stories_dict = {}
-
-    # Read ALL physically saved stories in the /data dir
-    data_dir = Path(__file__).parent.parent.parent / "data"
-    if data_dir.exists():
-        for story_folder in data_dir.iterdir():
-            if story_folder.is_dir():
-                json_path = story_folder / "story.json"
-                if json_path.exists():
-                    try:
-                        saved_story = json.loads(json_path.read_text("utf-8"))
-                        stories_dict[saved_story.get("id")] = saved_story
-                    except Exception as e:
-                        print(f"Failed to load saved story {story_folder.name}: {e}")
-
-    stories_with_panels = [normalize_story_session(s) for s in stories_dict.values()]
-            
-    return {"stories": stories_with_panels}
+    try:
+        stories = list_stories_from_gcs()
+        return {"stories": [normalize_story_session(s) for s in stories]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

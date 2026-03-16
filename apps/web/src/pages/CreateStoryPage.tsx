@@ -477,7 +477,7 @@ Please continue from the ${gamePhase} phase.`);
                             </Button>
                         </div>
 
-                        {!isConnected && (
+                        {/* {!isConnected && (
                             <div className="pt-8">
                                 <Button onClick={() => {
                                     setHeroes([
@@ -488,7 +488,7 @@ Please continue from the ${gamePhase} phase.`);
                                     setGamePhase('heroes');
                                 }} variant="ghost" className="text-white/40 hover:text-white/80 hover:bg-white/5 rounded-full px-6 font-medium tracking-wider text-sm uppercase">Skip to next (debug) →</Button>
                             </div>
-                        )}
+                        )} */}
                     </div>
                 )}
 

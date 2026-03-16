@@ -135,21 +135,25 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             mediaStreamRef.current = stream;
             console.log('[Mic] Got media stream:', stream.getAudioTracks()[0]?.getSettings());
 
-            const micCtx = new window.AudioContext({ sampleRate: 16000 });
+            // Reuse contexts pre-created in connect() during user gesture
+            const micCtx = micCtxRef.current ?? new window.AudioContext({ sampleRate: 16000 });
             micCtxRef.current = micCtx;
-            console.log('[Mic] Mic AudioContext created. Actual sample rate:', micCtx.sampleRate);
+            if (micCtx.state === 'suspended') await micCtx.resume();
+            console.log('[Mic] Mic AudioContext state:', micCtx.state, 'sampleRate:', micCtx.sampleRate);
 
-            const playbackCtx = new window.AudioContext({ sampleRate: 24000 });
+            const playbackCtx = audioContextRef.current ?? new window.AudioContext({ sampleRate: 24000 });
             audioContextRef.current = playbackCtx;
+            if (playbackCtx.state === 'suspended') await playbackCtx.resume();
+            if (!playbackAnalyserRef.current) {
+                const analyser = playbackCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(playbackCtx.destination);
+                playbackAnalyserRef.current = analyser;
+            }
             nextPlayTimeRef.current = playbackCtx.currentTime;
 
-            const playbackAnalyser = playbackCtx.createAnalyser();
-            playbackAnalyser.fftSize = 256;
-            playbackAnalyser.connect(playbackCtx.destination);
-            playbackAnalyserRef.current = playbackAnalyser;
-
             await micCtx.audioWorklet.addModule('/audio-processor.js');
-            console.log('[Mic] AudioWorklet module loaded.');
+            console.log('[Mic] AudioWorklet ready. Context state:', micCtx.state);
 
             const source = micCtx.createMediaStreamSource(stream);
 
@@ -332,6 +336,26 @@ export function useGeminiLive({ onMessage, onFunctionCall, onSceneUpdate, onHero
             intentionalDisconnectRef.current = false;
             reconnectAttemptRef.current = 0;
             lastSystemInstructionRef.current = systemInstruction;
+
+            // Pre-create AudioContexts + load worklet module HERE (inside user gesture
+            // call stack) so they start running. ws.onopen fires async and Chrome
+            // blocks AudioContext.resume() outside of a user gesture context.
+            if (!micCtxRef.current) {
+                const micCtx = new window.AudioContext({ sampleRate: 16000 });
+                micCtxRef.current = micCtx;
+                await micCtx.resume();
+                await micCtx.audioWorklet.addModule('/audio-processor.js');
+            }
+            if (!audioContextRef.current) {
+                const playbackCtx = new window.AudioContext({ sampleRate: 24000 });
+                audioContextRef.current = playbackCtx;
+                await playbackCtx.resume();
+                nextPlayTimeRef.current = playbackCtx.currentTime;
+                const analyser = playbackCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(playbackCtx.destination);
+                playbackAnalyserRef.current = analyser;
+            }
 
             const sessionId = Math.random().toString(36).substring(7);
             setCurrentSessionId(sessionId);

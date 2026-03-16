@@ -619,17 +619,21 @@ export function useStoryBuilder(sessionId: string) {
             });
             mediaStreamRef.current = stream;
 
-            const micCtx = new window.AudioContext({ sampleRate: 16000 });
+            // Reuse contexts pre-created in connect() during user gesture
+            const micCtx = micCtxRef.current ?? new window.AudioContext({ sampleRate: 16000 });
             micCtxRef.current = micCtx;
+            if (micCtx.state === 'suspended') await micCtx.resume();
 
-            const playbackCtx = new window.AudioContext({ sampleRate: 24000 });
+            const playbackCtx = audioContextRef.current ?? new window.AudioContext({ sampleRate: 24000 });
             audioContextRef.current = playbackCtx;
+            if (playbackCtx.state === 'suspended') await playbackCtx.resume();
+            if (!playbackAnalyserRef.current) {
+                const analyser = playbackCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(playbackCtx.destination);
+                playbackAnalyserRef.current = analyser;
+            }
             nextPlayTimeRef.current = playbackCtx.currentTime;
-
-            const playbackAnalyser = playbackCtx.createAnalyser();
-            playbackAnalyser.fftSize = 256;
-            playbackAnalyser.connect(playbackCtx.destination);
-            playbackAnalyserRef.current = playbackAnalyser;
 
             await micCtx.audioWorklet.addModule('/audio-processor.js');
 
@@ -869,6 +873,25 @@ export function useStoryBuilder(sessionId: string) {
             setStatus('connecting');
             setGuideTurnComplete(true);
             dispatch({ type: 'RESET_SESSION' });
+
+            // Pre-create AudioContexts HERE (inside user gesture call stack) so they
+            // start in running state. ws.onopen fires async and loses the gesture context.
+            if (!micCtxRef.current) {
+                const micCtx = new window.AudioContext({ sampleRate: 16000 });
+                micCtxRef.current = micCtx;
+                await micCtx.resume();
+                await micCtx.audioWorklet.addModule('/audio-processor.js');
+            }
+            if (!audioContextRef.current) {
+                const playbackCtx = new window.AudioContext({ sampleRate: 24000 });
+                await playbackCtx.resume();
+                audioContextRef.current = playbackCtx;
+                nextPlayTimeRef.current = playbackCtx.currentTime;
+                const analyser = playbackCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(playbackCtx.destination);
+                playbackAnalyserRef.current = analyser;
+            }
 
             const url = `${WS_URL}/api/build/${sessionId}`;
             const ws = new WebSocket(url);

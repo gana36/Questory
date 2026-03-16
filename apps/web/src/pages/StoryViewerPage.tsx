@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { API_URL } from '@/config';
 import { useParams, Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, Loader2, Star, Target, Play } from 'lucide-react';
@@ -73,7 +74,7 @@ export function StoryViewerPage() {
     const [slideshowActive, setSlideshowActive] = useState(false);
 
     useEffect(() => {
-        fetch(`http://localhost:8000/api/story-session/${sessionId}`)
+        fetch(`${API_URL}/api/story-session/${sessionId}`)
             .then(res => res.json())
             .then(data => {
                 setStory(data);
@@ -89,7 +90,7 @@ export function StoryViewerPage() {
         if (!sessionId) return;
         setIsSaving(true);
         try {
-            const res = await fetch(`http://localhost:8000/api/library/save/${sessionId}`, {
+            const res = await fetch(`${API_URL}/api/library/save/${sessionId}`, {
                 method: 'POST'
             });
             if (res.ok) {

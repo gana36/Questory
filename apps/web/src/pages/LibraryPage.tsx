@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { API_URL } from '@/config';
 import { Button } from '@/components/ui/button';
 import { Link } from 'react-router-dom';
 import { BookOpen, Loader2, Star } from 'lucide-react';
@@ -29,7 +30,7 @@ export function LibraryPage() {
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
-        fetch('http://localhost:8000/api/library')
+        fetch(`${API_URL}/api/library`)
             .then(res => res.json())
             .then(data => {
                 setStories(data.stories || []);

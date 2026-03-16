@@ -9,7 +9,20 @@ from google import genai
 from google.genai import types
 
 from src.services.image_gen import generate_image
-from src.services.story_session_store import load_story_session
+from src.services.story_session_store import load_story_session, save_story_session
+from src.services.gcs_library import save_story_to_gcs
+
+
+async def _gcs_panel_save(session_id: str, panels: list):
+    """Background task: persist current panels to GCS after each panel ack."""
+    try:
+        session_data = load_story_session(session_id) or {}
+        session_data["panels"] = panels
+        session_data.setdefault("status", "in_progress")
+        await asyncio.to_thread(save_story_to_gcs, session_id, session_data)
+        print(f"[{session_id}] Panel auto-saved to GCS ({len(panels)} panels)")
+    except Exception as e:
+        print(f"[{session_id}] GCS panel auto-save failed: {e}")
 
 COMIC_BUILDER_SYSTEM_INSTRUCTION = """
 You are a magical Story Guide for Questory — a learning adventure app where kids discover real knowledge through epic comic book stories!
@@ -633,6 +646,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                             last_panel_image_b64 = pending_scene["image_url"]
                                         print(f"[{session_id}] [Builder] Scene visible ack: {panel_id}")
 
+                                        # Persist panels to GCS immediately — survives instance restarts
+                                        asyncio.create_task(_gcs_panel_save(session_id, list(visible_panels)))
+
                                         explanation_focus = pending_scene.get("explanation_focus") or pending_scene["narration"]
                                         child_question = pending_scene.get("child_question")
                                         integration_hint = pending_scene.get("integration_hint")
@@ -711,13 +727,9 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                 except Exception as exc:
                     print(f"[{session_id}] [Builder] Client receive error: {exc}")
                 finally:
-                    # Save story progress on disconnect
+                    # Save story progress on disconnect to temp store
                     if visible_panels:
-                        from src.services.story_session_store import save_story_session, load_story_session
-                        
                         existing = load_story_session(session_id) or {}
-                        
-                        # Only update if we aren't already marked completed.
                         status = existing.get("status", "abrupt")
                         save_story_session(session_id, {
                             **existing,
@@ -974,13 +986,15 @@ async def proxy_comic_builder_session(client_ws: WebSocket, session_id: str):
                                         closing_narration = args.get("closing_narration", "")
                                         total_panels = args.get("total_panels", 0)
 
-                                        from src.services.story_session_store import save_story_session
                                         save_story_session(session_id, {
                                             "status": "completed",
                                             "closingNarration": closing_narration,
                                             "totalPanels": total_panels,
                                             "panels": visible_panels,
                                         })
+
+                                        # Update GCS with completed status + closing narration
+                                        asyncio.create_task(_gcs_panel_save(session_id, list(visible_panels)))
 
                                         await safe_send({
                                             "backendEvent": {

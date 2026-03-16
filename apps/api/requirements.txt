@@ -2,5 +2,6 @@ uvicorn
 fastapi
 websockets
 google-genai
+google-cloud-storage
 httpx
 python-dotenv
